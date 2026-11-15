@@ -161,7 +161,9 @@ export function rememberAttachment(details) {
       || length === null || length < 1_048_576 || !isFileMime(mime)
       || (encoding && encoding.toLowerCase() !== "identity")) return;
   if (observations.size >= 128) observations.delete(observations.keys().next().value);
-  observations.set(details.url, { length, etag, mime, at: Date.now() });
+  const filename = attachmentName(disposition);
+  observations.set(details.url, { length, etag, mime, filename, at: Date.now() });
+  return true;
 }
 
 export function trackDownloads(api, host) {
@@ -206,7 +208,7 @@ export function trackDownloads(api, host) {
       const filename = item.filename?.split(/[\\/]/).pop();
       if (!expected || Date.now() - expected.at > 30_000
           || (item.startTime && Math.abs(Date.parse(item.startTime) - expected.at) > 30_000)
-          || item.totalBytes !== expected.length
+          || (item.totalBytes >= 0 ? item.totalBytes !== expected.length : filename !== expected.filename)
           || mimeOf(item.mime) !== expected.mime || !filename || !AUTOMATIC_EXTENSIONS.test(filename)) return;
       if (attempted.size >= 256) attempted.delete(attempted.values().next().value);
       attempted.add(id);
@@ -251,4 +253,15 @@ export function trackDownloads(api, host) {
   void api.alarms.get(RECOVERY_ALARM).then(alarm => {
     if (!alarm) return api.alarms.create(RECOVERY_ALARM, { periodInMinutes: 1 });
   }).catch(() => {});
+
+  // Firefox can announce the download before WebRequest supplies its attachment headers.
+  return url => {
+    void (async () => {
+      if (!(await api.storage.local.get("automaticHandoff")).automaticHandoff) return;
+      const downloads = await api.downloads.search({ state: "in_progress", url });
+      for (const item of downloads) {
+        if (item.url === url) void attempt(item.id);
+      }
+    })().catch(() => {});
+  };
 }

@@ -127,3 +127,24 @@ test("a browser restart resumes an interrupted original that can still resume", 
   await until(() => fixture.events.includes("resume"));
   assert.equal(fixture.item.state, "in_progress");
 });
+
+
+test("attachment headers arriving after a browser download can trigger the handoff", async context => {
+  const fixture = browserFixture();
+  fixture.item.totalBytes = -1;
+  const freshUrl = URL.replace("/fixture.zip", "/fresh.zip");
+  fixture.item.url = freshUrl;
+  fixture.item.filename = "/downloads/fresh.zip";
+  context.mock.method(globalThis, "fetch", async () => new Response(Buffer.alloc(LENGTH), { headers }));
+  const reconsider = trackDownloads(fixture.api, "host");
+  fixture.api.downloads.onCreated.emit(fixture.item);
+  await wait(10);
+  assert.deepEqual(fixture.events, []);
+  assert(rememberAttachment({
+    url: freshUrl,
+    responseHeaders: Object.entries({ ...headers, "content-disposition": 'attachment; filename="fresh.zip"' })
+      .map(([name, value]) => ({ name, value })),
+  }));
+  reconsider(freshUrl);
+  await until(() => fixture.events.includes("cancel"));
+});

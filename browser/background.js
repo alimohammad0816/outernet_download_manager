@@ -14,7 +14,7 @@ api.runtime.onInstalled.addListener(() => {
     });
   }
 });
-trackDownloads(api, HOST);
+const reconsiderDownload = trackDownloads(api, HOST);
 
 function webUrl(input) {
   try {
@@ -100,7 +100,7 @@ function updateStreams(tabId, change) {
 
 api.webRequest.onHeadersReceived.addListener(details => {
   if (details.method !== "GET" || details.statusCode !== 200) return;
-  rememberAttachment(details);
+  if (rememberAttachment(details)) reconsiderDownload(details.url);
   if (details.tabId < 0) return;
   const format = streamFormat(details.url, details.responseHeaders);
   if (!format) return;
