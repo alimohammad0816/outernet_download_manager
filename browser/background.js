@@ -4,6 +4,7 @@ const HOST = "io.outernet.downloadmanager";
 const MENU = "outernet-download";
 const SESSION_MENU = "outernet-session";
 const MAX_STREAMS = 12;
+const QUALITY_CAPS = [1080, 720, 480, 360];
 const networkOperations = new Map();
 
 api.runtime.onInstalled.addListener(() => {
@@ -40,6 +41,9 @@ async function download(tabId, source) {
   const url = webUrl(source.url);
   const { maxHeight } = source.format && source.format !== "file"
     ? await api.storage.local.get("maxHeight") : {};
+  const height = source.format === "hls" || source.format === "dash"
+    ? ([0, ...QUALITY_CAPS].includes(source.maxHeight) ? source.maxHeight : maxHeight)
+    : undefined;
   let response;
   if (!url) {
     response = { ok: false, error: "Choose a direct HTTP or HTTPS media source." };
@@ -56,7 +60,7 @@ async function download(tabId, source) {
       response = { ok: false, error: error.message };
     }
   } else {
-    response = await requestHost({ action: "download", url, filename: source.filename, format: source.format, max_height: maxHeight });
+    response = await requestHost({ action: "download", url, filename: source.filename, format: source.format, max_height: height });
   }
   if (Number.isInteger(tabId) && tabId >= 0) {
     await api.storage.session.set({ [`result:${tabId}`]: response });
@@ -99,12 +103,23 @@ function updateStreams(tabId, change) {
 }
 
 api.webRequest.onHeadersReceived.addListener(details => {
-  if (details.method !== "GET" || details.statusCode !== 200) return;
-  if (rememberAttachment(details)) reconsiderDownload(details.url);
+  if (details.method !== "GET" || ![200, 206].includes(details.statusCode)) return;
+  if (details.statusCode === 200 && rememberAttachment(details)) reconsiderDownload(details.url);
   if (details.tabId < 0) return;
-  const format = streamFormat(details.url, details.responseHeaders);
+  const url = webUrl(details.url);
+  if (!url) return;
+  const type = details.responseHeaders?.find(header => header.name.toLowerCase() === "content-type")?.value ?? "";
+  const directType = details.type === "media" && /^video\/(mp4|webm|ogg)(?:\s*;|$)/i.exec(type);
+  const format = streamFormat(url, details.responseHeaders) || (directType ? "file" : null);
   if (!format) return;
-  const entry = { url: details.url, format, frameId: details.frameId };
+  const entry = { url, format, frameId: details.frameId };
+  if (format === "file") {
+    const leaf = new URL(url).pathname.split("/").pop();
+    if (!leaf || !/\.[a-z0-9]{2,5}$/i.test(leaf)) {
+      const extension = directType[1].toLowerCase();
+      entry.filename = `${leaf || "video"}.${extension === "ogg" ? "ogv" : extension}`;
+    }
+  }
   updateStreams(details.tabId, streams => [
     entry,
     ...streams.filter(item => item.url !== entry.url || item.frameId !== entry.frameId),
@@ -128,10 +143,16 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
     void download(tabId, message).then(respond, () => respond({ ok: false, error: "Could not send this download." }));
   } else if (message.action === "streams" && Number.isInteger(tabId) && tabId >= 0) {
     const key = `streams:${tabId}`;
-    void api.storage.session.get([key, `result:${tabId}`]).then(data => {
+    void (networkOperations.get(tabId) ?? Promise.resolve())
+      .then(() => api.storage.session.get([key, `result:${tabId}`])).then(data => {
       const items = data[key] ?? [];
+      const seen = new Set();
       respond({
-        streams: extensionPage ? items : items.filter(item => item.frameId === sender.frameId),
+        streams: items.filter(item => {
+          if ((!extensionPage && item.frameId !== sender.frameId) || seen.has(item.url)) return false;
+          seen.add(item.url);
+          return true;
+        }),
         result: data[`result:${tabId}`],
       });
     }, () => respond({ streams: [] }));

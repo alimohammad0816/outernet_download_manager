@@ -21,15 +21,19 @@ try {
   status.textContent = connection.ok
     ? (data?.result?.pending ? "Receiving through your browser…" : data?.result?.error || "Desktop app connected")
     : connection.error;
+  if (!data?.streams?.length) {
+    document.querySelector("#hint").textContent = "Start playing a video to detect its source, or right-click a link to download it.";
+  }
   for (const stream of data?.streams ?? []) {
     const row = document.createElement("li");
     const button = document.createElement("button");
     const url = new URL(stream.url);
-    button.textContent = `Download ${stream.format.toUpperCase()} · ${url.pathname.split("/").pop() || url.hostname}`;
+    const format = stream.format === "file" ? "video file" : stream.format.toUpperCase();
+    button.textContent = `Download ${format} · ${url.pathname.split("/").pop() || url.hostname}`;
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
-        const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream });
+        const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, maxHeight: Number(quality.value) });
         status.textContent = result.ok ? "Added to Outernet" : result.error;
       } catch {
         status.textContent = "Could not send this download.";

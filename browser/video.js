@@ -22,6 +22,7 @@
 
   let activeVideo;
   let activeSource;
+  let activeUrl;
   let streams = [];
   let pending = false;
   let messageTimeout;
@@ -46,11 +47,13 @@
         && rect.right > 0 && rect.left < innerWidth;
     });
     const video = videos.find(item => !item.paused && !item.ended) ?? videos[0];
-    if (video !== activeVideo) {
+    if (video !== activeVideo || video?.currentSrc !== activeUrl) {
       activeVideo = video;
+      activeUrl = video?.currentSrc;
       choices.replaceChildren();
     }
-    activeSource = video ? directSource(video) : null;
+    const direct = video ? directSource(video) : null;
+    activeSource = direct ? streams.find(stream => stream.url === direct.url) ?? direct : null;
     if (!video || (!activeSource && !streams.length) || document.fullscreenElement) {
       container.style.display = "none";
       return;
@@ -69,7 +72,7 @@
     button.textContent = "Sending…";
     try {
       const result = await api.runtime.sendMessage({ action: "download", ...source });
-      button.textContent = result.ok ? "Added to Outernet" : "Open Outernet settings";
+      button.textContent = result.ok ? "Added to Outernet" : "Could not queue video";
       button.title = result.error || "";
     } catch {
       button.textContent = "Outernet unavailable";
@@ -83,21 +86,43 @@
     }
   }
 
+  function addChoice(label, action) {
+    const option = document.createElement("button");
+    option.textContent = label;
+    option.title = label;
+    option.addEventListener("click", event => {
+      if (event.isTrusted && !pending) action();
+    });
+    choices.append(option);
+  }
+
+  function chooseQuality(source) {
+    if (source.format === "file") {
+      void send(source);
+      return;
+    }
+    choices.replaceChildren();
+    addChoice("Use extension preference", () => void send(source));
+    for (const [height, label] of [[0, "Best available"], [1080, "Up to 1080p"], [720, "Up to 720p"], [480, "Up to 480p"], [360, "Up to 360p"]]) {
+      addChoice(label, () => void send({ ...source, maxHeight: height }));
+    }
+  }
+
   button.addEventListener("click", event => {
     if (!event.isTrusted || pending) return;
-    if (activeSource) {
-      void send(activeSource);
-    } else if (streams.length === 1) {
-      void send(streams[0]);
-    } else if (choices.childElementCount) {
+    if (choices.childElementCount) {
       choices.replaceChildren();
+      return;
+    }
+    if (activeSource) {
+      chooseQuality(activeSource);
+    } else if (streams.length === 1) {
+      chooseQuality(streams[0]);
     } else {
       for (const stream of streams) {
-        const option = document.createElement("button");
         const url = new URL(stream.url);
-        option.textContent = `${stream.format.toUpperCase()} · ${url.pathname.split("/").pop() || url.hostname}`;
-        option.addEventListener("click", click => { if (click.isTrusted) void send(stream); });
-        choices.append(option);
+        const format = stream.format === "file" ? "Video file" : stream.format.toUpperCase();
+        addChoice(`${format} · ${url.pathname.split("/").pop() || url.hostname}`, () => chooseQuality(stream));
       }
     }
   });

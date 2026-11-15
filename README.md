@@ -36,9 +36,11 @@ npm run tauri dev
 
 Right-click a link and choose **Download with Outernet**. On pages with a
 supported video source, use **Download this video** beside the player. The
-extension popup lists HLS and DASH manifests detected in the active tab and
-lets you set a preferred resolution. Outernet picks the best quality up to
-the preference where offered, or the lowest known resolution above it.
+extension popup lists direct video responses and HLS/DASH manifests detected
+in the active tab. For HLS and DASH, choose the quality for this download
+beside the player, or set the default from the extension popup. Outernet
+picks the best quality up to the preference where offered, or the lowest
+known resolution above it.
 
 For a direct file behind a sign-in, use **Download with Outernet using site
 session**. The browser makes the authenticated request and streams the body
@@ -87,7 +89,8 @@ visibility, and Linux desktops need a system-tray host to display the tray icon.
 Choose separate **In-progress folder** and **Completed downloads folder** paths
 in **Settings**. Place the first folder on an HDD to keep transfer data and
 video assembly on that disk. An SSD selected as the final destination receives
-the completed file once. Folder changes apply to new downloads.
+the completed file once. If the in-progress folder is unavailable, reconnect
+the disk and use **Retry**. Folder changes apply to new downloads.
 
 Outernet requests up to four ranges in parallel when a large file advertises
 byte ranges and a strong ETag. Every range must match the requested byte

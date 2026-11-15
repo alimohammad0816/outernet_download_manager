@@ -16,7 +16,7 @@ function signal() {
   let callback;
   return {
     addListener(listener) { callback = listener; },
-    emit(data) { callback?.(data); },
+    emit(...args) { callback?.(...args); },
   };
 }
 
@@ -149,4 +149,66 @@ test("attachment headers arriving after a browser download can trigger the hando
   }));
   reconsider(freshUrl);
   await until(() => fixture.events.includes("cancel"));
+});
+
+test("browser finds progressive and adaptive video and forwards the chosen quality", async () => {
+  const fixture = browserFixture();
+  const session = new Map();
+  const native = [];
+  const headers = signal();
+  const messages = signal();
+  const api = fixture.api;
+  Object.assign(api.runtime, {
+    onInstalled: signal(),
+    onMessage: messages,
+    getURL: path => `chrome-extension://outernet/${path}`,
+    async sendNativeMessage(_host, message) { native.push(message); return { ok: true }; },
+  });
+  Object.assign(api, {
+    contextMenus: { onClicked: signal() },
+    tabs: { onUpdated: signal(), onRemoved: signal() },
+    webRequest: { onHeadersReceived: headers },
+    action: { async setBadgeText() {} },
+  });
+  api.storage.session = {
+    async get(keys) {
+      return Object.fromEntries([keys].flat().map(key => [key, session.get(key)]));
+    },
+    async set(values) {
+      for (const [key, value] of Object.entries(values)) session.set(key, value);
+    },
+  };
+  fixture.data.set("maxHeight", 720);
+  globalThis.chrome = api;
+  try {
+    await import("../browser/background.js");
+    function observe(url, type, contentType, frameId = 0, statusCode = 200) {
+      headers.emit({ url, type, statusCode, frameId, tabId: 8, method: "GET",
+        responseHeaders: [{ name: "Content-Type", value: contentType }] });
+    }
+    const direct = "https://example.test/movie?id=1";
+    const hls = "https://example.test/index?id=2";
+    const dash = "https://example.test/index?id=3";
+    observe(direct, "media", "video/mp4", 0, 206);
+    observe(hls, "xmlhttprequest", "application/vnd.apple.mpegurl", 0);
+    observe(hls, "xmlhttprequest", "application/vnd.apple.mpegurl", 1);
+    observe(dash, "xmlhttprequest", "application/dash+xml", 1);
+    observe("https://example.test/segment.m4s", "xmlhttprequest", "video/mp4", 0, 206);
+
+    const popup = { url: api.runtime.getURL("popup.html") };
+    const player = { url: "https://example.test", tab: { id: 8 }, frameId: 0 };
+    const send = (message, sender = popup) => new Promise(resolve => messages.emit(message, sender, resolve));
+    const toolbar = await send({ action: "streams", tabId: 8 });
+    assert.deepEqual(toolbar.streams.map(({ url, format }) => [url, format]), [[dash, "dash"], [hls, "hls"], [direct, "file"]]);
+    const frame = await send({ action: "streams" }, player);
+    assert.deepEqual(frame.streams.map(({ url }) => url), [hls, direct]);
+    await send({ action: "download", tabId: 8, ...frame.streams[0], maxHeight: 480 });
+    await send({ action: "download", tabId: 8, ...frame.streams[0], maxHeight: 0 });
+    await send({ action: "download", tabId: 8, ...frame.streams[0] });
+    await send({ action: "download", tabId: 8, ...frame.streams[1], maxHeight: 480 });
+    assert.deepEqual(native.map(message => message.max_height), [480, 0, 720, undefined]);
+    assert.equal(native.at(-1).filename, "movie.mp4");
+  } finally {
+    delete globalThis.chrome;
+  }
 });

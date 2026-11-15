@@ -315,6 +315,37 @@ fn tests_completed_download_retry_without_reaccessing_network() {
 }
 
 #[test]
+fn disconnected_working_folder_is_not_recreated_and_can_be_retried() {
+    let (_root, _destination, database, settings, store) = setup(None);
+    let (url, server) = serve(Response::Complete(1024, 27));
+    let hash = expected(1024, 27);
+    store
+        .add(url, "reconnected.bin".into(), hash.clone())
+        .unwrap();
+    fs::remove_dir(&settings.working_folder).unwrap();
+    store.process_next().unwrap();
+    let failed = job(&store);
+    assert!(failed.status == Status::Failed);
+    assert!(failed
+        .error
+        .unwrap()
+        .contains("in-progress folder is unavailable"));
+    assert!(!settings.working_folder.exists());
+    let destination = settings.destination_folder.join("reconnected.bin");
+    assert!(!destination.exists());
+
+    drop(store);
+    fs::create_dir(&settings.working_folder).unwrap();
+    let store = Store::open(&database, settings).unwrap();
+    store.recover().unwrap();
+    store.retry(failed.id).unwrap();
+    store.process_next().unwrap();
+    server.join().unwrap().expect("the engine made the request");
+    assert!(job(&store).status == Status::Complete);
+    assert_eq!(transfer::sha256(&destination).unwrap(), hash);
+}
+
+#[test]
 #[ignore = "streams more than 4 GiB; run before release"]
 fn downloads_over_four_gib() {
     let other_volume = std::env::var_os("OUTERNET_TEST_DESTINATION").map(PathBuf::from);

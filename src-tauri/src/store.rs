@@ -587,6 +587,11 @@ impl Store {
     }
 
     fn transfer(&self, job: &mut Job, control: &TransferControl) -> Result<(), String> {
+        if !job.settings.working_folder.is_dir() {
+            return Err(
+                "The in-progress folder is unavailable. Reconnect the drive and retry.".into(),
+            );
+        }
         let directory = job.working_dir();
         if !ranges::has_checkpoint(&directory) {
             transfer::reset_working_directory(&directory)?;
