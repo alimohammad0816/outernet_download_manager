@@ -108,5 +108,5 @@ volumes need more than 4 GiB free.
 
 GitHub Actions builds x86-64 installers on Ubuntu 24.04 and Windows Server
 2025 and packages both browser extensions. Pushing a version tag that matches
-`src-tauri/tauri.conf.json` runs the large-file test before creating a draft
-release.
+`src-tauri/tauri.conf.json` runs the large-file test before publishing a GitHub Release with the two
+installers, the two browser extensions, and a SHA-256 checksum file.
