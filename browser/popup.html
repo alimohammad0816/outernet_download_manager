@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Outernet</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <header><img src="icon.png" alt="" width="25" height="25"><h1>Outernet</h1></header>
+  <p id="status" role="status">Checking desktop connection…</p>
+  <label for="quality">Stream quality</label>
+  <select id="quality">
+    <option value="0">Best available</option>
+    <option value="1080">Up to 1080p</option>
+    <option value="720">Up to 720p</option>
+    <option value="480">Up to 480p</option>
+    <option value="360">Up to 360p</option>
+  </select>
+  <ul id="streams" aria-label="Detected video streams"></ul>
+  <p id="hint">Right-click a link to send it to Outernet.</p>
+</body>
+</html>

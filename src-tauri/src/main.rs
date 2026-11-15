@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser;
+mod media;
+mod ranges;
 mod store;
 mod transfer;
 
-use std::{io, sync::Arc, time::Duration};
+use std::{fs, io, path::Path, sync::Arc, time::Duration};
 use store::{Settings, Snapshot, Store};
 use tauri::{Manager, State};
 
@@ -32,7 +35,46 @@ async fn retry_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), 
     store.retry(id)
 }
 
+#[tauri::command]
+async fn pause_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
+    store.pause(id)
+}
+
+const APP_ID: &str = "io.outernet.downloadmanager";
+
+fn open_store(data: &Path) -> Result<Store, io::Error> {
+    fs::create_dir_all(data)?;
+    let working_folder = data.join("working");
+    fs::create_dir_all(&working_folder)?;
+    let destination_folder = dirs::download_dir()
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| data.join("completed"));
+    fs::create_dir_all(&destination_folder)?;
+    Store::open(
+        &data.join("downloads.sqlite"),
+        Settings {
+            working_folder,
+            destination_folder,
+        },
+    )
+    .map_err(io::Error::other)
+}
+
+#[tauri::command]
+async fn connect_browser(browser: String) -> Result<(), String> {
+    browser::register(&browser)
+}
+
 fn main() {
+    if let Some(origin) = std::env::args()
+        .nth(1)
+        .filter(|arg| arg.starts_with("chrome-extension://"))
+    {
+        if let Err(error) = browser::run_host(&origin) {
+            eprintln!("{error}");
+        }
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
@@ -43,23 +85,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data = app.path().app_local_data_dir()?;
-            std::fs::create_dir_all(&data)?;
-            let working_folder = data.join("working");
-            std::fs::create_dir_all(&working_folder)?;
-            let destination_folder = app
-                .path()
-                .download_dir()
-                .ok()
-                .filter(|path| path.is_dir())
-                .unwrap_or_else(|| data.join("completed"));
-            std::fs::create_dir_all(&destination_folder)?;
-            let defaults = Settings {
-                working_folder,
-                destination_folder,
-            };
-            let store = Arc::new(
-                Store::open(&data.join("downloads.sqlite"), defaults).map_err(io::Error::other)?,
-            );
+            let store = Arc::new(open_store(&data)?);
             store.recover().map_err(io::Error::other)?;
             app.manage(Arc::clone(&store));
             std::thread::Builder::new()
@@ -78,7 +104,9 @@ fn main() {
             snapshot,
             save_settings,
             add_download,
-            retry_download
+            retry_download,
+            pause_download,
+            connect_browser
         ])
         .run(tauri::generate_context!())
         .expect("Outernet could not start");

@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, Check, CircleAlert, FolderOpen, HardDrive, List, Plus, RefreshCw, Settings2, X } from "lucide-react";
+import { ArrowDownToLine, Check, CircleAlert, FolderOpen, Globe, HardDrive, List, Pause, Play, Plus, RefreshCw, Settings2, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 type Settings = { workingFolder: string; destinationFolder: string };
-type Status = "queued" | "downloading" | "verifying" | "ready" | "complete" | "failed";
+type Status = "queued" | "downloading" | "pausing" | "paused" | "verifying" | "ready" | "complete" | "failed";
 type Job = {
   id: string;
   url: string;
@@ -19,11 +19,13 @@ type Job = {
 };
 type Snapshot = { settings: Settings; jobs: Job[] };
 type Filter = "all" | "complete" | "failed";
-type Panel = "add" | "settings";
+type Panel = "add" | "settings" | "browser";
 
 const statusLabel: Record<Status, string> = {
   queued: "Queued",
   downloading: "Downloading",
+  pausing: "Pausing",
+  paused: "Paused",
   verifying: "Verifying",
   ready: "Saving to destination",
   complete: "Complete",
@@ -168,6 +170,42 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
   );
 }
 
+function BrowserSettings({ onClose }: { onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function connect(browser: string, label: string) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await invoke("connect_browser", { browser });
+      setMessage(`${label} is registered. Open the extension to check the connection.`);
+    } catch (failure) {
+      setError(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Browser integration" onClose={onClose}>
+      <div className="browser-help">
+        <p>Load the Outernet browser extension, then connect your browser below.</p>
+        <p className="muted">In the browser’s Extensions page, enable Developer mode and choose Load unpacked. Select the extracted Outernet extension folder.</p>
+        <div className="browser-actions">
+          {([["chrome", "Chrome"], ["edge", "Edge"], ["chromium", "Chromium"]] as const).map(([browser, label]) => (
+            <button key={browser} type="button" className="button secondary" disabled={busy} onClick={() => void connect(browser, label)}>{label}</button>
+          ))}
+        </div>
+        {message && <p role="status">{message}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
+      </div>
+    </Modal>
+  );
+}
+
 function App() {
   const [state, setState] = useState<Snapshot>();
   const [filter, setFilter] = useState<Filter>("all");
@@ -195,10 +233,10 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  async function retry(id: string) {
+  async function jobAction(command: "retry_download" | "pause_download", id: string) {
     setActionError("");
     try {
-      await invoke("retry_download", { id });
+      await invoke(command, { id });
       await refresh();
     } catch (failure) {
       setActionError(describe(failure));
@@ -223,7 +261,10 @@ function App() {
             </button>
           ))}
         </nav>
-        <button className="nav-button settings" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /> Settings</button>
+        <div className="sidebar-tools">
+        <button className="nav-button" onClick={() => setPanel("browser")}><Globe size={17} /> Browser integration</button>
+        <button className="nav-button" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /> Settings</button>
+        </div>
       </aside>
       <main>
         <header>
@@ -242,7 +283,18 @@ function App() {
                   <td><span className={`badge ${job.status}`}>{statusLabel[job.status]}</span>
                     {job.status === "complete" && job.expectedSha256 && <small>SHA-256 verified</small>}</td>
                   <td className="file-size">{job.bytes > 0 || job.status === "complete" ? displaySize(job.bytes) : "—"}</td>
-                  <td>{job.status === "failed" && <button className="icon-button" title="Retry" aria-label={`Retry ${job.filename}`} onClick={() => void retry(job.id)}><RefreshCw size={16} /></button>}</td>
+                  <td>
+                    {(job.status === "queued" || job.status === "downloading") && (
+                      <button className="icon-button" title="Pause" aria-label={`Pause ${job.filename}`} onClick={() => void jobAction("pause_download", job.id)}><Pause size={16} /></button>
+                    )}
+                    {(job.status === "paused" || job.status === "failed") && (
+                      <button className="icon-button" title={job.status === "paused" ? "Resume" : "Retry"}
+                        aria-label={`${job.status === "paused" ? "Resume" : "Retry"} ${job.filename}`}
+                        onClick={() => void jobAction("retry_download", job.id)}>
+                        {job.status === "paused" ? <Play size={16} /> : <RefreshCw size={16} />}
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -257,6 +309,7 @@ function App() {
         </section>
         {state && <footer><HardDrive size={15} /><button title={state.settings.workingFolder} onClick={() => setPanel("settings")}>In progress · {state.settings.workingFolder}</button></footer>}
       </main>
+      {panel === "browser" && <BrowserSettings onClose={closePanel} />}
       {panel === "add" && <AddDownload onClose={closePanel} onSave={refresh} />}
       {panel === "settings" && state && <SettingsForm settings={state.settings} onClose={closePanel} onSave={refresh} />}
     </div>

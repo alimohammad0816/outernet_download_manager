@@ -1,12 +1,13 @@
 {
   "name": "outernet-download-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:extension": "node --check browser/background.js && node --check browser/popup.js && node --check browser/video.js"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",

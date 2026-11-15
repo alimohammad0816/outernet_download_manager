@@ -1,0 +1,313 @@
+use crate::transfer;
+use reqwest::{
+    blocking::{Client, Response},
+    header::{self, HeaderMap},
+    StatusCode,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, File},
+    io::{self, Read, Seek, SeekFrom, Write},
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Mutex,
+    },
+    thread,
+};
+use url::Url;
+
+const CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_WORKERS: usize = 4;
+const CHECKPOINT: &str = "ranges.json";
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct Identity {
+    url: Url,
+    etag: String,
+    length: u64,
+}
+
+#[derive(Debug)]
+enum PartError {
+    Changed,
+    Interrupted,
+    Write(io::Error),
+}
+
+pub fn has_checkpoint(directory: &Path) -> bool {
+    directory.join(CHECKPOINT).is_file()
+}
+
+pub fn completed_bytes(directory: &Path) -> Option<u64> {
+    let identity: Identity =
+        serde_json::from_reader(File::open(directory.join(CHECKPOINT)).ok()?).ok()?;
+    let mut bytes = 0;
+    for entry in fs::read_dir(directory).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(index) = parse_part_name(&name.to_string_lossy()) else {
+            continue;
+        };
+        if index < identity.length.div_ceil(CHUNK_BYTES) {
+            bytes += bounds(index, identity.length).1;
+        }
+    }
+    Some(bytes)
+}
+
+fn parse_part_name(name: &str) -> Option<u64> {
+    name.strip_prefix("part-")?
+        .strip_suffix(".sha256")?
+        .parse()
+        .ok()
+}
+
+pub fn try_download(url: &str, directory: &Path, paused: &AtomicBool) -> Result<bool, String> {
+    transfer::check_paused(paused)?;
+    let client = transfer::http_client(true)?;
+    let response = match client
+        .head(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+    {
+        Ok(response) => response,
+        Err(_) if !has_checkpoint(directory) => return Ok(false),
+        Err(_) => return Err("Cannot check the remote file. Completed parts were kept.".into()),
+    };
+    let Some(identity) = identity(&response) else {
+        if response.status().is_server_error() && has_checkpoint(directory) {
+            return Err("The server is temporarily unavailable. Completed parts were kept.".into());
+        }
+        return Ok(false);
+    };
+    let client = transfer::http_client(false)?;
+    let payload = directory.join("payload");
+    let checkpoint = directory.join(CHECKPOINT);
+    let previous = File::open(&checkpoint)
+        .ok()
+        .and_then(|file| serde_json::from_reader::<_, Identity>(file).ok());
+    if previous.as_ref() != Some(&identity)
+        || fs::metadata(&payload).map(|file| file.len()).ok() != Some(identity.length)
+    {
+        transfer::reset_working_directory(directory)?;
+        fs::create_dir(directory).map_err(write_error)?;
+        let file = File::create(&payload).map_err(write_error)?;
+        file.set_len(identity.length).map_err(write_error)?;
+        file.sync_all().map_err(write_error)?;
+        let bytes = serde_json::to_vec(&identity).map_err(|error| error.to_string())?;
+        save_marker(directory, &checkpoint, &bytes).map_err(write_error)?;
+    }
+    let count = identity.length.div_ceil(CHUNK_BYTES);
+    let next = AtomicU64::new(0);
+    let stop = AtomicBool::new(false);
+    let failure = Mutex::new(None::<PartError>);
+
+    let mut workers_failed = false;
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..MAX_WORKERS.min(usize::try_from(count).unwrap_or(MAX_WORKERS)) {
+            handles.push(scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) && !paused.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= count {
+                        break;
+                    }
+                    if let Err(error) = fetch_part(&client, directory, &identity, index, paused) {
+                        stop.store(true, Ordering::Relaxed);
+                        let mut failure = failure.lock().expect("part error lock");
+                        // A version mismatch invalidates all saved pieces even if another request failed first.
+                        if failure.is_none() || matches!(error, PartError::Changed) {
+                            *failure = Some(error);
+                        }
+                    }
+                }
+            }));
+        }
+        for worker in handles {
+            workers_failed |= worker.join().is_err();
+        }
+    });
+    transfer::check_paused(paused)?;
+    if workers_failed {
+        return Err(
+            "A download worker stopped unexpectedly. Retry will recheck completed parts.".into(),
+        );
+    }
+    match failure.into_inner().expect("part error lock") {
+        None => Ok(true),
+        Some(PartError::Changed) => Ok(false),
+        Some(PartError::Interrupted) => {
+            Err("A byte-range request was interrupted. Retry can reuse verified parts.".into())
+        }
+        Some(PartError::Write(error)) => Err(write_error(error)),
+    }
+}
+
+fn identity(response: &Response) -> Option<Identity> {
+    if response.status() != StatusCode::OK || !unencoded(response.headers()) {
+        return None;
+    }
+    let etag = strong_etag(response.headers())?.to_string();
+    let length = response
+        .headers()
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()?;
+    if length < CHUNK_BYTES * 2
+        || transfer::parse_url(response.url().as_str()).is_err()
+        || !response
+            .headers()
+            .get(header::ACCEPT_RANGES)
+            .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"bytes"))
+    {
+        return None;
+    }
+    Some(Identity {
+        url: response.url().clone(),
+        etag,
+        length,
+    })
+}
+
+fn strong_etag(headers: &HeaderMap) -> Option<&str> {
+    let etag = headers.get(header::ETAG)?.to_str().ok()?;
+    let tag = etag.strip_prefix('"')?.strip_suffix('"')?;
+    tag.bytes()
+        .all(|byte| byte == b'!' || (0x23..=0x7e).contains(&byte))
+        .then_some(etag)
+}
+
+pub(crate) fn unencoded(headers: &HeaderMap) -> bool {
+    let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
+    encodings
+        .next()
+        .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"))
+        && encodings.next().is_none()
+}
+
+fn bounds(index: u64, length: u64) -> (u64, u64) {
+    let start = index * CHUNK_BYTES;
+    (start, CHUNK_BYTES.min(length - start))
+}
+
+fn fetch_part(
+    client: &Client,
+    directory: &Path,
+    identity: &Identity,
+    index: u64,
+    paused: &AtomicBool,
+) -> Result<(), PartError> {
+    let (start, size) = bounds(index, identity.length);
+    let marker = directory.join(format!("part-{index}.sha256"));
+    let mut payload = File::options()
+        .read(true)
+        .write(true)
+        .open(directory.join("payload"))
+        .map_err(PartError::Write)?;
+    payload
+        .seek(SeekFrom::Start(start))
+        .map_err(PartError::Write)?;
+    if let Ok(recorded) = fs::read_to_string(&marker) {
+        let existing = hash_part(&mut payload, size).map_err(PartError::Write)?;
+        if recorded == existing {
+            return Ok(());
+        }
+        fs::remove_file(&marker).map_err(PartError::Write)?;
+        payload
+            .seek(SeekFrom::Start(start))
+            .map_err(PartError::Write)?;
+    }
+
+    let end = start + size - 1;
+    let mut response = client
+        .get(identity.url.clone())
+        .header(header::RANGE, format!("bytes={start}-{end}"))
+        .header(header::IF_RANGE, &identity.etag)
+        .send()
+        .map_err(|_| PartError::Interrupted)?;
+    if response.status().is_server_error() || response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(PartError::Interrupted);
+    }
+    let range = format!("bytes {start}-{end}/{}", identity.length);
+    let headers = response.headers();
+    if response.status() != StatusCode::PARTIAL_CONTENT
+        || strong_etag(headers) != Some(&identity.etag)
+        || !unencoded(headers)
+        || headers
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            != Some(range.as_str())
+        || headers.get(header::CONTENT_LENGTH).is_some_and(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                != Some(size)
+        })
+    {
+        return Err(PartError::Changed);
+    }
+    let mut hash = Sha256::new();
+    let mut block = [0; 64 * 1024];
+    let mut remaining = size;
+    while remaining > 0 {
+        if paused.load(Ordering::Relaxed) {
+            return Err(PartError::Interrupted);
+        }
+        let read = block.len().min(remaining as usize);
+        let received = response
+            .read(&mut block[..read])
+            .map_err(|_| PartError::Interrupted)?;
+        if received == 0 {
+            return Err(PartError::Interrupted);
+        }
+        payload
+            .write_all(&block[..received])
+            .map_err(PartError::Write)?;
+        hash.update(&block[..received]);
+        remaining -= received as u64;
+    }
+    if response
+        .read(&mut block[..1])
+        .map_err(|_| PartError::Interrupted)?
+        > 0
+    {
+        return Err(PartError::Changed);
+    }
+    payload.sync_data().map_err(PartError::Write)?;
+    save_marker(
+        directory,
+        &marker,
+        format!("{:x}", hash.finalize()).as_bytes(),
+    )
+    .map_err(PartError::Write)
+}
+
+fn hash_part(payload: &mut File, size: u64) -> io::Result<String> {
+    let mut hash = Sha256::new();
+    let mut reader = payload.take(size);
+    if io::copy(&mut reader, &mut hash)? != size {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "A saved byte range is incomplete.",
+        ));
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn save_marker(directory: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut marker = tempfile::NamedTempFile::new_in(directory)?;
+    marker.write_all(bytes)?;
+    marker.as_file().sync_all()?;
+    marker.persist(path)?;
+    #[cfg(unix)]
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn write_error(error: io::Error) -> String {
+    format!("Cannot save download data: {error}")
+}

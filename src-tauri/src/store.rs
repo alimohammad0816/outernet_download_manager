@@ -1,10 +1,16 @@
-use crate::transfer;
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::{
+    media::{self, Format},
+    ranges, transfer,
+};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use uuid::Uuid;
 
@@ -20,6 +26,8 @@ pub struct Settings {
 pub enum Status {
     Queued,
     Downloading,
+    Pausing,
+    Paused,
     Verifying,
     Ready,
     Complete,
@@ -33,6 +41,10 @@ pub struct Job {
     pub url: String,
     pub filename: String,
     pub settings: Settings,
+    #[serde(default)]
+    pub format: Format,
+    #[serde(default)]
+    pub max_height: Option<u32>,
     pub expected_sha256: Option<String>,
     pub sha256: Option<String>,
     pub status: Status,
@@ -58,8 +70,13 @@ impl Job {
     }
 
     fn progress(mut self) -> Self {
-        if self.status == Status::Downloading {
-            self.bytes = fs::metadata(self.payload()).map_or(0, |file| file.len());
+        if matches!(
+            self.status,
+            Status::Downloading | Status::Pausing | Status::Paused
+        ) && self.attempt.is_some()
+        {
+            self.bytes = ranges::completed_bytes(&self.working_dir())
+                .unwrap_or_else(|| fs::metadata(self.payload()).map_or(0, |file| file.len()));
         }
         self
     }
@@ -71,27 +88,45 @@ pub struct Snapshot {
     pub jobs: Vec<Job>,
 }
 
-pub struct Store(Mutex<Connection>);
+pub struct Store {
+    database: Mutex<Connection>,
+    worker: Mutex<Option<ActiveDownload>>,
+}
+
+struct ActiveDownload {
+    id: String,
+    paused: Arc<AtomicBool>,
+}
 
 impl Store {
     pub fn open(path: &Path, defaults: Settings) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(db_error)?;
         connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_error)?;
+        connection
             .execute_batch("PRAGMA synchronous=FULL;
                 CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL);")
             .map_err(db_error)?;
-        let store = Self(Mutex::new(connection));
-        if store.read()?.is_none() {
-            store.write(&Snapshot {
-                settings: defaults,
-                jobs: Vec::new(),
-            })?;
-        }
-        Ok(store)
+        let initial = Snapshot {
+            settings: defaults,
+            jobs: Vec::new(),
+        };
+        let json = serde_json::to_string(&initial).map_err(db_error)?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO app_state (id, snapshot) VALUES (1, ?1)",
+                params![json],
+            )
+            .map_err(db_error)?;
+        Ok(Self {
+            database: Mutex::new(connection),
+            worker: Mutex::new(None),
+        })
     }
 
     fn read(&self) -> Result<Option<Snapshot>, String> {
-        self.0
+        self.database
             .lock()
             .map_err(db_error)?
             .query_row("SELECT snapshot FROM app_state WHERE id = 1", [], |row| {
@@ -101,11 +136,6 @@ impl Store {
             .map_err(db_error)?
             .map(|json| serde_json::from_str(&json).map_err(db_error))
             .transpose()
-    }
-
-    fn write(&self, state: &Snapshot) -> Result<(), String> {
-        let connection = self.0.lock().map_err(db_error)?;
-        save(&connection, state)
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
@@ -118,15 +148,19 @@ impl Store {
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
-        let connection = self.0.lock().map_err(db_error)?;
-        let json: String = connection
+        let mut connection = self.database.lock().map_err(db_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let json: String = transaction
             .query_row("SELECT snapshot FROM app_state WHERE id = 1", [], |row| {
                 row.get(0)
             })
             .map_err(db_error)?;
         let mut state = serde_json::from_str(&json).map_err(db_error)?;
         let result = apply(&mut state)?;
-        save(&connection, &state)?;
+        save(&transaction, &state)?;
+        transaction.commit().map_err(db_error)?;
         Ok(result)
     }
 
@@ -143,8 +177,42 @@ impl Store {
     }
 
     pub fn add(&self, url: String, filename: String, sha256: String) -> Result<(), String> {
+        self.add_job(url, filename, sha256, None)
+    }
+
+    pub fn add_from_browser(
+        &self,
+        url: String,
+        filename: String,
+        format: Option<Format>,
+        max_height: Option<u32>,
+    ) -> Result<(), String> {
+        self.add_job(url, filename, String::new(), Some((format, max_height)))
+    }
+
+    fn add_job(
+        &self,
+        url: String,
+        filename: String,
+        sha256: String,
+        browser_source: Option<(Option<Format>, Option<u32>)>,
+    ) -> Result<(), String> {
         let url = transfer::parse_url(&url)?;
-        let filename = filename.trim().to_string();
+        let (format, max_height) = browser_source.unwrap_or_default();
+        let format = format.unwrap_or_else(|| Format::from_url(&url));
+        let max_height = max_height.filter(|height| (1..=4320).contains(height));
+        let mut filename = filename.trim().to_string();
+        if format != Format::File && !filename.to_ascii_lowercase().ends_with(".mkv") {
+            let suffix = if format == Format::Hls {
+                ".m3u8"
+            } else {
+                ".mpd"
+            };
+            if filename.to_ascii_lowercase().ends_with(suffix) {
+                filename.truncate(filename.len() - suffix.len());
+            }
+            filename.push_str(".mkv");
+        }
         if !transfer::valid_name(&filename) {
             return Err("Enter a valid filename for Linux and Windows.".into());
         }
@@ -158,14 +226,27 @@ impl Store {
         };
         self.update(|state| {
             let settings = state.settings.clone();
-            let dest = settings.destination_folder.join(&filename);
-            if dest.exists()
-                || state
-                    .jobs
-                    .iter()
-                    .any(|job| job.status != Status::Complete && job.destination() == dest)
-            {
-                return Err("This destination filename is already in use.".into());
+            let is_taken = |name: &str| {
+                let destination = settings.destination_folder.join(name);
+                destination.exists()
+                    || state.jobs.iter().any(|job| {
+                        job.status != Status::Complete && job.destination() == destination
+                    })
+            };
+            if is_taken(&filename) {
+                if browser_source.is_none() {
+                    return Err("This destination filename is already in use.".into());
+                }
+                let (stem, extension) = filename
+                    .rsplit_once('.')
+                    .filter(|(stem, _)| !stem.is_empty())
+                    .map_or((filename.as_str(), String::new()), |(stem, extension)| {
+                        (stem, format!(".{extension}"))
+                    });
+                filename = (2..=10_000)
+                    .map(|index| format!("{stem} ({index}){extension}"))
+                    .find(|name| transfer::valid_name(name) && !is_taken(name))
+                    .ok_or("Choose a shorter or different filename in Outernet.")?;
             }
             state.jobs.insert(
                 0,
@@ -174,6 +255,8 @@ impl Store {
                     url: url.into(),
                     filename,
                     settings,
+                    format,
+                    max_height,
                     expected_sha256,
                     sha256: None,
                     status: Status::Queued,
@@ -186,6 +269,27 @@ impl Store {
         })
     }
 
+    pub fn pause(&self, id: String) -> Result<(), String> {
+        let active = self.worker.lock().map_err(db_error)?;
+        self.update(|state| {
+            let job = state
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or("Download not found.")?;
+            job.status = match job.status {
+                Status::Queued => Status::Paused,
+                Status::Downloading => Status::Pausing,
+                _ => return Err("Only active or queued downloads can be paused.".into()),
+            };
+            Ok(())
+        })?;
+        if let Some(job) = active.as_ref().filter(|job| job.id == id) {
+            job.paused.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     pub fn retry(&self, id: String) -> Result<(), String> {
         self.update(|state| {
             let job = state
@@ -193,8 +297,8 @@ impl Store {
                 .iter_mut()
                 .find(|job| job.id == id)
                 .ok_or("Download not found.")?;
-            if job.status != Status::Failed {
-                return Err("Only failed downloads can be retried.".into());
+            if !matches!(job.status, Status::Failed | Status::Paused) {
+                return Err("Choose a paused or failed download to continue.".into());
             }
             job.status = if job.sha256.is_some() {
                 Status::Ready
@@ -210,10 +314,13 @@ impl Store {
     pub fn recover(&self) -> Result<(), String> {
         self.update(|state| {
             for job in &mut state.jobs {
+                if job.status == Status::Pausing {
+                    job.status = Status::Paused;
+                }
                 if matches!(job.status, Status::Downloading | Status::Verifying) {
                     job.status = Status::Failed;
                     job.error = Some(
-                        "The previous transfer was interrupted. Retry starts a fresh download."
+                        "The previous transfer was interrupted. Retry will check for reusable parts."
                             .into(),
                     );
                 }
@@ -229,6 +336,10 @@ impl Store {
     }
 
     pub fn process_next(&self) -> Result<bool, String> {
+        let mut worker = self.worker.lock().map_err(db_error)?;
+        if worker.is_some() {
+            return Ok(false);
+        }
         let next = self
             .snapshot()?
             .jobs
@@ -238,48 +349,86 @@ impl Store {
         let Some(mut job) = next else {
             return Ok(false);
         };
-        let result = self.process(&mut job);
-        if let Err(error) = result {
-            job.status = Status::Failed;
-            job.error = Some(error);
+        let paused = Arc::new(AtomicBool::new(false));
+        let pending_transfer = job.status == Status::Queued;
+        if pending_transfer {
+            job.status = Status::Downloading;
+            job.attempt
+                .get_or_insert_with(|| Uuid::new_v4().to_string());
             self.save_job(&job)?;
-            if job.sha256.is_none() {
+        }
+        *worker = Some(ActiveDownload {
+            id: job.id.clone(),
+            paused: Arc::clone(&paused),
+        });
+        drop(worker);
+
+        let outcome = if pending_transfer {
+            self.transfer(&mut job, &paused)
+                .and_then(|()| self.publish(&mut job))
+        } else {
+            self.publish(&mut job)
+        };
+        let mut worker = self.worker.lock().map_err(db_error)?;
+        *worker = None;
+        if let Err(error) = outcome {
+            job.status = if paused.load(Ordering::Relaxed) {
+                Status::Paused
+            } else {
+                Status::Failed
+            };
+            job.error = (job.status == Status::Failed).then_some(error);
+            if job.sha256.is_none() && !ranges::has_checkpoint(&job.working_dir()) {
                 let _ = fs::remove_dir_all(job.working_dir());
             }
+            self.save_job(&job)?;
         }
         Ok(true)
     }
 
-    fn process(&self, job: &mut Job) -> Result<(), String> {
-        if job.status == Status::Queued {
-            job.attempt = Some(Uuid::new_v4().to_string());
-            job.status = Status::Downloading;
-            self.save_job(job)?;
-            transfer::download(&job.url, &job.working_dir())?;
-            let file = File::options()
-                .read(true)
-                .write(true)
-                .open(job.payload())
-                .map_err(working_error)?;
-            file.sync_all().map_err(working_error)?;
-            job.bytes = file.metadata().map_err(working_error)?.len();
-            drop(file);
+    fn transfer(&self, job: &mut Job, paused: &AtomicBool) -> Result<(), String> {
+        let directory = job.working_dir();
+        if !ranges::has_checkpoint(&directory) {
+            transfer::reset_working_directory(&directory)?;
+        }
+        match job.format {
+            Format::File => {
+                if !ranges::try_download(&job.url, &directory, paused)? {
+                    transfer::reset_working_directory(&directory)?;
+                    transfer::download(&job.url, &directory, paused)?;
+                }
+            }
+            format => media::download(&job.url, &directory, format, job.max_height, paused)?,
+        }
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(job.payload())
+            .map_err(working_error)?;
+        file.sync_all().map_err(working_error)?;
+        job.bytes = file.metadata().map_err(working_error)?.len();
+        drop(file);
+        {
+            let _worker = self.worker.lock().map_err(db_error)?;
+            transfer::check_paused(paused)?;
             job.status = Status::Verifying;
             self.save_job(job)?;
-            let digest = transfer::sha256(&job.payload()).map_err(working_error)?;
-            if job
-                .expected_sha256
-                .as_ref()
-                .is_some_and(|expected| expected != &digest)
-            {
-                return Err(
-                    "SHA-256 mismatch. The received file was not saved to the destination.".into(),
-                );
-            }
-            job.sha256 = Some(digest);
-            job.status = Status::Ready;
-            self.save_job(job)?;
         }
+        let digest = transfer::sha256(&job.payload()).map_err(working_error)?;
+        if job
+            .expected_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &digest)
+        {
+            transfer::reset_working_directory(&directory)?;
+            return Err("SHA-256 mismatch. The received file was rejected.".into());
+        }
+        job.sha256 = Some(digest);
+        job.status = Status::Ready;
+        self.save_job(job)
+    }
+
+    fn publish(&self, job: &mut Job) -> Result<(), String> {
         let digest = job
             .sha256
             .as_deref()

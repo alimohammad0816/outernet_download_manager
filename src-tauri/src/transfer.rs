@@ -3,7 +3,10 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+    time::Duration,
 };
 use tempfile::NamedTempFile;
 use url::Url;
@@ -48,7 +51,8 @@ pub fn valid_name(name: &str) -> bool {
         })
 }
 
-pub fn download(url: &str, directory: &Path) -> Result<(), String> {
+pub fn download(url: &str, directory: &Path, paused: &AtomicBool) -> Result<(), String> {
+    check_paused(paused)?;
     fs::create_dir(directory)
         .map_err(|error| format!("Cannot create the working folder: {error}"))?;
     let mut command = Command::new("aria2c");
@@ -94,8 +98,7 @@ pub fn download(url: &str, directory: &Path) -> Result<(), String> {
         let _ = child.wait();
         return Err(format!("Cannot send the URL to aria2: {error}"));
     }
-    let status = child
-        .wait()
+    let status = wait_for_child(&mut child, paused)
         .map_err(|error| format!("Cannot wait for aria2: {error}"))?;
     let file = directory.join("payload");
     if !status.success() || !file.is_file() || directory.join("payload.aria2").exists() {
@@ -168,4 +171,57 @@ pub fn normalize_folder(path: PathBuf) -> Result<PathBuf, String> {
         .map_err(|error| format!("Cannot write to the folder: {error}"))?;
     // Preserve the user's normal path spelling, including ordinary Windows paths for aria2.
     Ok(path)
+}
+
+pub fn http_client(follow_redirects: bool) -> Result<reqwest::blocking::Client, String> {
+    use reqwest::{header, redirect::Policy};
+    use std::time::Duration;
+
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        header::HeaderValue::from_static("identity"),
+    );
+    let redirects = if follow_redirects {
+        Policy::limited(8)
+    } else {
+        Policy::none()
+    };
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(90))
+        .redirect(redirects)
+        .default_headers(headers)
+        .user_agent("Outernet Download Manager")
+        .build()
+        .map_err(|error| format!("Cannot initialize HTTP: {error}"))
+}
+
+pub fn reset_working_directory(directory: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Cannot reset the working folder: {error}")),
+    }
+}
+
+pub fn check_paused(paused: &AtomicBool) -> Result<(), String> {
+    if paused.load(Ordering::Relaxed) {
+        Err("Download paused.".into())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn wait_for_child(child: &mut Child, paused: &AtomicBool) -> io::Result<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if paused.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            return child.wait();
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }

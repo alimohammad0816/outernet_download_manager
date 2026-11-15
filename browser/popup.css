@@ -1,0 +1,11 @@
+:root { color-scheme: light dark; font: 13px/1.4 system-ui,sans-serif; }
+body { width: 290px; margin: 0; padding: 14px; }
+header { display: flex; gap: 8px; align-items: center; }
+h1 { margin: 0; font-size: 16px; }
+p { margin: 10px 0; overflow-wrap: anywhere; }
+#hint { opacity: .75; }
+ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+button { width: 100%; text-align: left; padding: 7px; border: 1px solid #7778; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button:hover { background: #8882; }
+label { margin-right: 6px; }
+select { font: inherit; padding: 4px; margin-bottom: 8px; }

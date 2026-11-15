@@ -44,21 +44,41 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev aria2
-      - name: Install Windows test engine
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev cmake aria2 ffmpeg
+      - name: Install Windows test engines
         if: runner.os == 'Windows'
         run: |
-          choco install aria2 --yes --no-progress
+          choco install aria2 ffmpeg nasm --yes --no-progress
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "$env:ChocolateyInstall\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          foreach ($engine in @("aria2c", "ffmpeg")) {
+            $package = if ($engine -eq "aria2c") { "aria2" } else { "ffmpeg" }
+            $binary = Get-ChildItem "$env:ChocolateyInstall\lib\$package" -Recurse -Filter "$engine.exe" |
+              Select-Object -First 1
+            if ($binary) {
+              $binary.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
       - run: aria2c --version
+      - run: ffmpeg -version
       - run: npm ci
       - run: npm run build
+      - run: npm run check:extension
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test download_integrity
+      - name: Test download integrity
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/outernet-tests.log"
+          if ! cargo test --locked --manifest-path src-tauri/Cargo.toml 2>&1 | tee "$output"; then
+            awk '/^error(:|\[)|panicked at|^\s+Some\(|Download failed:|Cannot start aria2/ {
+              gsub(/%/, "%25"); gsub(/\r/, ""); print "::error title=Outernet tests::" substr($0, 1, 450);
+              if (++count >= 8) exit;
+            }' "$output"
+            exit 1
+          fi
       - name: Verify transfer larger than 4 GiB
         if: startsWith(github.ref, 'refs/tags/v') || inputs.test_large_file
-        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --test download_integrity downloads_over_four_gib -- --ignored --exact
+        run: cargo test --release --locked --features tauri/custom-protocol --manifest-path src-tauri/Cargo.toml --test download_integrity downloads_over_four_gib -- --ignored --exact
       - name: Build installer
         run: npm run tauri -- build --bundles ${{ matrix.bundle }} -- --locked
       - uses: actions/upload-artifact@v7
@@ -67,9 +87,24 @@ jobs:
           path: ${{ matrix.path }}
           if-no-files-found: error
 
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Package the browser extension
+        working-directory: browser
+        run: zip -q -r ../outernet-browser-extension.zip .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: browser-extension
+          path: outernet-browser-extension.zip
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, browser]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -87,4 +122,4 @@ jobs:
         run: |
           version="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
           test "$GITHUB_REF_NAME" = "v$version"
-          gh release create "$GITHUB_REF_NAME" installers/*.deb installers/*-setup.exe --verify-tag --draft --generate-notes
+          gh release create "$GITHUB_REF_NAME" installers/*.deb installers/*-setup.exe installers/outernet-browser-extension.zip --verify-tag --draft --generate-notes
