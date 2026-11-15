@@ -345,6 +345,48 @@ fn disconnected_working_folder_is_not_recreated_and_can_be_retried() {
     assert_eq!(transfer::sha256(&destination).unwrap(), hash);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn working_file_write_failure_leaves_no_published_file() {
+    const CHILD: &str = "OUTERNET_TEST_FILE_SIZE_LIMITED";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new("bash")
+            .args([
+                "-c",
+                r#"trap '' XFSZ; ulimit -f 128 || exit; exec "$@""#,
+                "outernet-test",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "working_file_write_failure_leaves_no_published_file",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let (_root, _destination, _, settings, store) = setup(None);
+    let (url, server) = serve(Response::Complete(512 * 1024, 11));
+    store
+        .add(url, "write-error.bin".into(), String::new())
+        .unwrap();
+    store.process_next().unwrap();
+    // The sender may observe a closed socket before writing the entire fixture.
+    let _ = server.join();
+    let failed = job(&store);
+    assert!(failed.status == Status::Failed);
+    assert!(failed
+        .error
+        .unwrap()
+        .contains("Cannot write the temporary file"));
+    assert!(failed.sha256.is_none());
+    assert!(!settings.destination_folder.join("write-error.bin").exists());
+    assert_eq!(fs::read_dir(settings.working_folder).unwrap().count(), 0);
+}
+
 #[test]
 #[ignore = "streams more than 4 GiB; run before release"]
 fn downloads_over_four_gib() {
@@ -817,15 +859,31 @@ fn replacing_a_remote_file_with_same_length_never_mixes_bytes() {
 fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     let (_root, _destination, _, settings, store) = setup(None);
     let local = tempfile::tempdir().unwrap();
-    for (format, arguments, filename) in [
+    for (folder, format, arguments, filename) in [
         (
+            "hls",
             "hls",
             &["-hls_time", "1", "-hls_playlist_type", "vod"][..],
             "video.m3u8",
         ),
-        ("dash", &["-seg_duration", "1"][..], "video.mpd"),
+        (
+            "hls-range",
+            "hls",
+            &[
+                "-hls_time",
+                "1",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_flags",
+                "single_file",
+            ][..],
+            "video.m3u8",
+        ),
+        ("dash", "dash", &["-seg_duration", "1"][..], "video.mpd"),
     ] {
-        let path = local.path().join(format);
+        let path = local.path().join(folder);
         fs::create_dir(&path).unwrap();
         let status = std::process::Command::new("ffmpeg")
             .current_dir(&path)
@@ -865,11 +923,68 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     fs::write(local.path().join("hls/master.m3u8"),
         "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=160x120\nvideo.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080\nmissing-1080p.m3u8\n"
     ).unwrap();
+    let range_directory = local.path().join("hls-range");
+    let range_playlist = fs::read_to_string(range_directory.join("video.m3u8")).unwrap();
+    assert!(range_playlist.contains("#EXT-X-MAP:") && range_playlist.contains("#EXT-X-BYTERANGE:"));
+    let mut first = true;
+    let implicit = range_playlist
+        .lines()
+        .map(|line| {
+            if let Some((range, _)) = line.split_once('@') {
+                if range.starts_with("#EXT-X-BYTERANGE:") {
+                    if !first {
+                        return range;
+                    }
+                    first = false;
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(range_directory.join("implicit.m3u8"), &implicit).unwrap();
+    fs::write(
+        range_directory.join("changed.m3u8"),
+        implicit.replace("video.m4s", "changed.m4s"),
+    )
+    .unwrap();
     let root = local.path().to_owned();
     let fixture = Fixture::start(move |mut stream, request| {
-        let path = request.split_whitespace().nth(1).unwrap();
-        let path = root.join(path.trim_start_matches('/'));
+        let name = request
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .trim_start_matches('/');
+        let changed = name.ends_with("/changed.m4s");
+        let path = root.join(if changed { "hls-range/video.m4s" } else { name });
         if let Ok(bytes) = fs::read(path) {
+            if let Some(range) = request.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("range") {
+                    value.trim().strip_prefix("bytes=")
+                } else {
+                    None
+                }
+            }) {
+                let (start, last) = range.split_once('-').unwrap();
+                let (start, last) = (
+                    start.parse::<usize>().unwrap(),
+                    last.parse::<usize>().unwrap(),
+                );
+                let resumed = request
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("if-range:"));
+                let etag = if changed && resumed {
+                    "different"
+                } else {
+                    "stable"
+                };
+                write!(stream,
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{last}/{}\r\nETag: \"{etag}\"\r\nConnection: close\r\n\r\n",
+                    last + 1 - start, bytes.len()).unwrap();
+                let _ = stream.write_all(&bytes[start..=last]);
+                return;
+            }
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -884,6 +999,7 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     });
     for (input, output) in [
         ("hls/master.m3u8", "hls.mkv"),
+        ("hls-range/implicit.m3u8", "hls-range.mkv"),
         ("dash/video.mpd", "dash.mkv"),
     ] {
         store
@@ -924,6 +1040,7 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     fs::remove_file(dash_segment).unwrap();
     fs::remove_file(local.path().join("hls/video1.ts")).unwrap();
     for (url, filename) in [
+        ("hls-range/changed.m3u8", "hls-changed.mkv"),
         ("dash/video.mpd", "dash-incomplete.mkv"),
         ("hls/video.m3u8", "hls-incomplete.mkv"),
     ] {

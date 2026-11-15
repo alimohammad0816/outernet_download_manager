@@ -60,8 +60,10 @@ the complete body is durably queued. If the handoff fails, the extension
 resumes the original when the browser can resume it.
 
 Video support covers finished unencrypted HLS playlists with discrete
-segments and static single-period DASH with fragmented MP4 SegmentTemplates.
-Outernet assembles these streams into Matroska (`.mkv`).
+segments or byte ranges, and static single-period DASH with fragmented MP4
+SegmentTemplates. For HLS byte ranges, the server must return the requested
+range and a strong ETag so Outernet can detect source changes. Outernet
+assembles these streams into Matroska (`.mkv`).
 
 ## Schedule the queue
 

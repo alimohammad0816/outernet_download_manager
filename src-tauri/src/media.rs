@@ -331,14 +331,9 @@ fn stage_hls(
         return Err("Choose a finished HLS video. Live streams are currently unsupported.".into());
     }
     if lines.iter().any(|line| {
-        [
-            "#EXT-X-BYTERANGE",
-            "#EXT-X-SKIP",
-            "#EXT-X-GAP",
-            "#EXT-X-STREAM-INF",
-        ]
-        .iter()
-        .any(|tag| line.starts_with(tag))
+        ["#EXT-X-SKIP", "#EXT-X-GAP", "#EXT-X-STREAM-INF"]
+            .iter()
+            .any(|tag| line.starts_with(tag))
     }) {
         return Err("This HLS playlist uses an unsupported segment layout.".into());
     }
@@ -349,6 +344,9 @@ fn stage_hls(
     let mut target = 1.0_f64;
     let mut count = 0;
     let mut mapped = false;
+    let mut pending_range = None;
+    let mut previous_range = None;
+    let mut resources = HashMap::new();
     for line in lines {
         if let Some(value) = line.strip_prefix("#EXTINF:") {
             let seconds = value
@@ -360,11 +358,12 @@ fn stage_hls(
             if pending_duration.replace(seconds).is_some() {
                 return Err("An HLS segment is missing its URL.".into());
             }
+        } else if let Some(value) = line.strip_prefix("#EXT-X-BYTERANGE:") {
+            if pending_range.replace(value).is_some() {
+                return Err("An HLS segment has more than one byte range.".into());
+            }
         } else if let Some(map) = line.strip_prefix("#EXT-X-MAP:") {
             let attrs = attributes(map);
-            if attrs.contains_key("BYTERANGE") {
-                return Err("HLS initialization byte ranges are currently unsupported.".into());
-            }
             let url = source_url(
                 base,
                 attrs
@@ -372,7 +371,18 @@ fn stage_hls(
                     .ok_or("An HLS initialization segment is missing its URL.")?,
             )?;
             let name = format!("{prefix}-init-{count}.mp4");
-            fetch_segment(client, &url, &directory.join(&name), control)?;
+            let range = attrs
+                .get("BYTERANGE")
+                .map(|value| hls_range(value, None))
+                .transpose()?;
+            fetch_segment(
+                client,
+                &url,
+                &directory.join(&name),
+                range,
+                &mut resources,
+                control,
+            )?;
             playlist.push_str(&format!("#EXT-X-MAP:URI=\"{name}\"\n"));
             mapped = true;
         } else if line == "#EXT-X-DISCONTINUITY" {
@@ -393,14 +403,30 @@ fn stage_hls(
                 _ => "ts",
             };
             let name = format!("{prefix}-{count}.{extension}");
-            fetch_segment(client, &url, &directory.join(&name), control)?;
+            let implicit_start = previous_range
+                .take()
+                .filter(|(previous, _)| previous == &url)
+                .map(|(_, end)| end);
+            let range = pending_range
+                .take()
+                .map(|value| hls_range(value, implicit_start))
+                .transpose()?;
+            fetch_segment(
+                client,
+                &url,
+                &directory.join(&name),
+                range,
+                &mut resources,
+                control,
+            )?;
+            previous_range = range.map(|(_, end)| (url, end));
             playlist.push_str(&format!("#EXTINF:{seconds},\n{name}\n"));
             duration += seconds;
             target = target.max(seconds.ceil());
             count += 1;
         }
     }
-    if pending_duration.is_some() || count == 0 || duration <= 0.0 {
+    if pending_duration.is_some() || pending_range.is_some() || count == 0 || duration <= 0.0 {
         return Err("The HLS playlist is incomplete.".into());
     }
     let list = directory.join(format!("{prefix}.m3u8"));
@@ -411,18 +437,104 @@ fn stage_hls(
     Ok((list, duration))
 }
 
+fn hls_range(value: &str, implicit_start: Option<u64>) -> Result<(u64, u64), String> {
+    let (length, start) = match value.split_once('@') {
+        Some((length, start)) => (length, start.parse::<u64>().ok()),
+        None => (value, implicit_start),
+    };
+    start
+        .zip(length.parse::<u64>().ok().filter(|length| *length > 0))
+        .and_then(|(start, length)| start.checked_add(length).map(|end| (start, end)))
+        .ok_or_else(|| "The HLS playlist contains an invalid byte range.".into())
+}
+
+#[derive(PartialEq)]
+struct HlsResource {
+    url: Url,
+    etag: String,
+    total: u64,
+}
+
+fn open_hls_range(
+    client: &Client,
+    url: &Url,
+    start: u64,
+    end: u64,
+    resources: &mut HashMap<Url, HlsResource>,
+) -> Result<Response, String> {
+    let last = end - 1;
+    let previous = resources.get(url);
+    let mut request = client
+        .get(url.clone())
+        .header(header::RANGE, format!("bytes={start}-{last}"));
+    if let Some(previous) = previous {
+        request = request.header(header::IF_RANGE, &previous.etag);
+    }
+    let response = request
+        .send()
+        .map_err(|_| "Cannot retrieve the HLS byte range.")?;
+    let headers = response.headers();
+    let prefix = format!("bytes {start}-{last}/");
+    let total = headers
+        .get(header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix(&prefix))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|total| *total >= end);
+    let resource = match (total, transfer::strong_etag(headers)) {
+        (Some(total), Some(etag))
+            if response.status() == StatusCode::PARTIAL_CONTENT
+                && transfer::unencoded(headers)
+                && headers.get(header::CONTENT_LENGTH).is_none_or(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        == Some(end - start)
+                }) =>
+        {
+            HlsResource {
+                url: response.url().clone(),
+                etag: etag.into(),
+                total,
+            }
+        }
+        _ => {
+            return Err(
+                "The server did not return the requested HLS byte range with a strong ETag.".into(),
+            )
+        }
+    };
+    if previous.is_some_and(|previous| *previous != resource) {
+        return Err("An HLS resource changed during transfer.".into());
+    }
+    resources.entry(url.clone()).or_insert(resource);
+    Ok(response)
+}
+
 fn fetch_segment(
     client: &Client,
     url: &Url,
     destination: &Path,
+    range: Option<(u64, u64)>,
+    resources: &mut HashMap<Url, HlsResource>,
     control: &TransferControl,
 ) -> Result<(), String> {
+    control.check()?;
     let mut file = File::options()
         .create_new(true)
         .write(true)
         .open(destination)
         .map_err(disk_error)?;
-    copy_segment(client, url, &mut file, control)
+    match range {
+        Some((start, end)) => copy_response(
+            open_hls_range(client, url, start, end, resources)?,
+            &mut file,
+            Some(end - start),
+            control,
+        ),
+        None => copy_segment(client, url, &mut file, control),
+    }
 }
 
 fn copy_segment(
@@ -432,12 +544,21 @@ fn copy_segment(
     control: &TransferControl,
 ) -> Result<(), String> {
     control.check()?;
-    let mut response = open_http(client, url)?;
+    let response = open_http(client, url)?;
     let expected = response
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|length| length.parse::<u64>().ok());
+    copy_response(response, file, expected, control)
+}
+
+fn copy_response(
+    mut response: Response,
+    file: &mut File,
+    expected: Option<u64>,
+    control: &TransferControl,
+) -> Result<(), String> {
     let mut bytes = 0;
     let mut block = vec![0; control.chunk_bytes(64 * 1024)];
     loop {
@@ -448,10 +569,13 @@ fn copy_segment(
         if length == 0 {
             break;
         }
+        bytes += length as u64;
+        if expected.is_some_and(|expected| bytes > expected) {
+            return Err("The server returned more bytes than expected for a video segment.".into());
+        }
         control.account_network(length)?;
         file.write_all(&block[..length]).map_err(disk_error)?;
         control.commit_bytes(length as u64);
-        bytes += length as u64;
     }
     if bytes == 0 || expected.is_some_and(|length| length != bytes) {
         return Err("The server returned an incomplete video segment.".into());

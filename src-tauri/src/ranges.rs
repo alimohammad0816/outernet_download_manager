@@ -1,8 +1,7 @@
 use crate::{progress::TransferControl, transfer};
 use reqwest::{
     blocking::{Client, Response},
-    header::{self, HeaderMap},
-    StatusCode,
+    header, StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -162,7 +161,7 @@ fn identity(response: &Response) -> Option<Identity> {
     if response.status() != StatusCode::OK || !transfer::unencoded(response.headers()) {
         return None;
     }
-    let etag = strong_etag(response.headers())?.to_string();
+    let etag = transfer::strong_etag(response.headers())?.to_string();
     let length = response
         .headers()
         .get(header::CONTENT_LENGTH)?
@@ -184,14 +183,6 @@ fn identity(response: &Response) -> Option<Identity> {
         etag,
         length,
     })
-}
-
-fn strong_etag(headers: &HeaderMap) -> Option<&str> {
-    let etag = headers.get(header::ETAG)?.to_str().ok()?;
-    let tag = etag.strip_prefix('"')?.strip_suffix('"')?;
-    tag.bytes()
-        .all(|byte| byte == b'!' || (0x23..=0x7e).contains(&byte))
-        .then_some(etag)
 }
 
 fn bounds(index: u64, length: u64) -> (u64, u64) {
@@ -246,7 +237,7 @@ fn fetch_part(
     let range = format!("bytes {start}-{end}/{}", identity.length);
     let headers = response.headers();
     if response.status() != StatusCode::PARTIAL_CONTENT
-        || strong_etag(headers) != Some(&identity.etag)
+        || transfer::strong_etag(headers) != Some(&identity.etag)
         || !transfer::unencoded(headers)
         || headers
             .get(header::CONTENT_RANGE)

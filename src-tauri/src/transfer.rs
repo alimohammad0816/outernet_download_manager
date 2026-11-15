@@ -119,6 +119,14 @@ pub fn download(
     Ok(())
 }
 
+pub fn strong_etag(headers: &reqwest::header::HeaderMap) -> Option<&str> {
+    let etag = headers.get(reqwest::header::ETAG)?.to_str().ok()?;
+    let tag = etag.strip_prefix('"')?.strip_suffix('"')?;
+    tag.bytes()
+        .all(|byte| byte == b'!' || (0x23..=0x7e).contains(&byte))
+        .then_some(etag)
+}
+
 pub fn unencoded(headers: &reqwest::header::HeaderMap) -> bool {
     let mut encodings = headers.get_all(reqwest::header::CONTENT_ENCODING).iter();
     encodings

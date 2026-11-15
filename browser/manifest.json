@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Outernet Download Manager",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Send links and detected videos to the Outernet desktop download queue.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr+UEozgZyt3KVBgEQmoH2+8I9xRZD4T+U8q2jrr1l73QOCW2IHspF25XGWfApRi3+qlC/uc+RngTyh0sWhqqV9E49Hj10Xjb/HaROUzSfTzrL9Pm0tTZuVNQKYYFRdKBKNWH5zgM0E0wrK+YWorceh7cRGVExfXoiMnpFb3d1fNVMiMl4J1Usz42DYefC3DE3VFN02Lmx7u67HVtzoXaQ0wwlmdEXP637HB6h8VZoipmdovzFd34NlFjkDurF88tO5EgGvUaZN9jMQgro6BRJkBWhtbKRmF+MJBsB3+6CWk2J6DNWqQK1tOBhwc5Vb2EH19pP5irPLE0Mh6XhxPCMQIDAQAB",
   "permissions": [
