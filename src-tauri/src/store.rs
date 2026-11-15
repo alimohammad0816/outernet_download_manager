@@ -395,7 +395,12 @@ impl Store {
             Format::File => {
                 if !ranges::try_download(&job.url, &directory, paused)? {
                     transfer::reset_working_directory(&directory)?;
-                    transfer::download(&job.url, &directory, paused)?;
+                    transfer::download(
+                        &job.url,
+                        &directory,
+                        job.expected_sha256.is_some(),
+                        paused,
+                    )?;
                 }
             }
             format => media::download(&job.url, &directory, format, job.max_height, paused)?,

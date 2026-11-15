@@ -8,8 +8,8 @@ and Windows. Its local queue, settings, and history use SQLite.
 Get the x86-64 desktop installer and browser extension from the
 [Desktop builds workflow](https://github.com/alimohammad0816/outernet_download_manager/actions/workflows/build.yml)
 or the matching [GitHub Release](https://github.com/alimohammad0816/outernet_download_manager/releases).
-The Linux `.deb` depends on aria2 and FFmpeg. On Windows, install aria2 and FFmpeg
-separately and ensure `aria2c`, `ffmpeg`, and `ffprobe` are available on PATH
+The Linux `.deb` depends on FFmpeg. On Windows, install FFmpeg separately and
+ensure `ffmpeg` and `ffprobe` are available on PATH
 when launching Outernet.
 
 For development, install Node.js 24, stable Rust, CMake, the
@@ -75,7 +75,7 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo test --release --locked --manifest-path src-tauri/Cargo.toml --test download_integrity downloads_over_four_gib -- --ignored --exact
 ```
 
-The tests use loopback fixtures and require aria2, FFmpeg, and ffprobe. To test a
+The tests use loopback fixtures and require FFmpeg and ffprobe. To test a
 cross-filesystem copy of the large fixture, set `OUTERNET_TEST_DESTINATION` to
 a directory on a different volume from the system temporary directory. Both
 volumes need more than 4 GiB free.

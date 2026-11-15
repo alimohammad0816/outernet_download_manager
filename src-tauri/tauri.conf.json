@@ -20,6 +20,6 @@
   "bundle": {
     "active": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
-    "linux": { "deb": { "depends": ["aria2", "ffmpeg"] } }
+    "linux": { "deb": { "depends": ["ffmpeg"] } }
   }
 }

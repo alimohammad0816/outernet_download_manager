@@ -23,6 +23,8 @@ enum Response {
     Complete(u64, u8),
     Truncated,
     TruncatedChunked,
+    CompleteChunked,
+    CloseDelimited,
     UnsolicitedPartial,
 }
 
@@ -45,6 +47,8 @@ fn serve(response: Response) -> (String, thread::JoinHandle<Option<String>>) {
                     Err(error) => panic!("{error}"),
                 }
             };
+            // Winsock inherits the listener's nonblocking mode on accepted sockets.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -56,6 +60,8 @@ fn serve(response: Response) -> (String, thread::JoinHandle<Option<String>>) {
             }
         };
         let raw = match response {
+            Response::CompleteChunked => Some("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\nexample\r\n0\r\n\r\n"),
+            Response::CloseDelimited => Some("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nexample"),
             Response::TruncatedChunked => Some("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1000\r\npartial data"),
             Response::UnsolicitedPartial => Some("HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/12\r\nConnection: close\r\n\r\ndata"),
             _ => None,
@@ -152,7 +158,7 @@ fn downloads_exact_bytes_after_reopening_the_queue() {
     let store = Store::open(&database, settings.clone()).unwrap();
     store.recover().unwrap();
     assert!(store.process_next().unwrap());
-    let request = server.join().unwrap().expect("aria2 made the request");
+    let request = server.join().unwrap().expect("the engine made the request");
     assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
     assert!(
         job(&store).status == Status::Complete,
@@ -179,9 +185,37 @@ fn refuses_truncated_response_and_wrong_hash() {
         let (url, server) = serve(response);
         store.add(url, "invalid.bin".into(), hash).unwrap();
         store.process_next().unwrap();
-        server.join().unwrap().expect("aria2 made the request");
+        server.join().unwrap().expect("the engine made the request");
         assert!(job(&store).status == Status::Failed);
         assert!(!settings.destination_folder.join("invalid.bin").exists());
+    }
+}
+
+#[test]
+fn verifies_chunked_and_connection_delimited_responses() {
+    let hash = format!("{:x}", Sha256::digest(b"example"));
+    for (response, reference, complete) in [
+        (Response::CompleteChunked, String::new(), true),
+        (Response::CloseDelimited, String::new(), false),
+        (Response::CloseDelimited, hash.clone(), true),
+    ] {
+        let (_root, _destination, _, settings, store) = setup(None);
+        let (url, server) = serve(response);
+        store.add(url, "framing.bin".into(), reference).unwrap();
+        store.process_next().unwrap();
+        server.join().unwrap().expect("the engine made the request");
+        let file = settings.destination_folder.join("framing.bin");
+        assert_eq!(
+            job(&store).status == Status::Complete,
+            complete,
+            "{:?}",
+            job(&store).error
+        );
+        if complete {
+            assert_eq!(transfer::sha256(&file).unwrap(), hash);
+        } else {
+            assert!(!file.exists());
+        }
     }
 }
 
@@ -193,7 +227,7 @@ fn tests_completed_download_retry_without_reaccessing_network() {
     store.add(url, "retry.bin".into(), hash.clone()).unwrap();
     fs::remove_dir(&settings.destination_folder).unwrap();
     store.process_next().unwrap();
-    server.join().unwrap().expect("aria2 made the request");
+    server.join().unwrap().expect("the engine made the request");
     let failed = job(&store);
     assert!(failed.status == Status::Failed);
     assert!(failed.sha256.is_some());
@@ -224,7 +258,7 @@ fn downloads_over_four_gib() {
     let (url, server) = serve(Response::Complete(length, 19));
     store.add(url, "large.bin".into(), hash.clone()).unwrap();
     store.process_next().unwrap();
-    server.join().unwrap().expect("aria2 made the request");
+    server.join().unwrap().expect("the engine made the request");
     assert!(
         job(&store).status == Status::Complete,
         "{:?}",
@@ -265,6 +299,7 @@ impl Fixture {
                         let handler = Arc::clone(&handler);
                         connections.retain(|client: &thread::JoinHandle<()>| !client.is_finished());
                         connections.push(thread::spawn(move || {
+                            stream.set_nonblocking(false).unwrap();
                             stream
                                 .set_read_timeout(Some(Duration::from_secs(5)))
                                 .unwrap();

@@ -1,7 +1,7 @@
 #[path = "media/dash.rs"]
 mod dash;
 
-use crate::{ranges, transfer};
+use crate::transfer;
 use reqwest::{
     blocking::{Client, Response},
     header, StatusCode,
@@ -129,7 +129,7 @@ fn open_http(client: &Client, url: &Url) -> Result<Response, String> {
         .map_err(|_| "Cannot retrieve the media source.")?;
     let headers = response.headers();
     if response.status() != StatusCode::OK
-        || !ranges::unencoded(headers)
+        || !transfer::unencoded(headers)
         || headers
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())

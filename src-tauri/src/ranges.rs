@@ -98,6 +98,13 @@ pub fn try_download(url: &str, directory: &Path, paused: &AtomicBool) -> Result<
         let bytes = serde_json::to_vec(&identity).map_err(|error| error.to_string())?;
         save_marker(directory, &checkpoint, &bytes).map_err(write_error)?;
     }
+    let payload = Mutex::new(
+        File::options()
+            .read(true)
+            .write(true)
+            .open(&payload)
+            .map_err(write_error)?,
+    );
     let count = identity.length.div_ceil(CHUNK_BYTES);
     let next = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
@@ -113,7 +120,9 @@ pub fn try_download(url: &str, directory: &Path, paused: &AtomicBool) -> Result<
                     if index >= count {
                         break;
                     }
-                    if let Err(error) = fetch_part(&client, directory, &identity, index, paused) {
+                    if let Err(error) =
+                        fetch_part(&client, directory, &identity, &payload, index, paused)
+                    {
                         stop.store(true, Ordering::Relaxed);
                         let mut failure = failure.lock().expect("part error lock");
                         // A version mismatch invalidates all saved pieces even if another request failed first.
@@ -145,7 +154,7 @@ pub fn try_download(url: &str, directory: &Path, paused: &AtomicBool) -> Result<
 }
 
 fn identity(response: &Response) -> Option<Identity> {
-    if response.status() != StatusCode::OK || !unencoded(response.headers()) {
+    if response.status() != StatusCode::OK || !transfer::unencoded(response.headers()) {
         return None;
     }
     let etag = strong_etag(response.headers())?.to_string();
@@ -180,14 +189,6 @@ fn strong_etag(headers: &HeaderMap) -> Option<&str> {
         .then_some(etag)
 }
 
-pub(crate) fn unencoded(headers: &HeaderMap) -> bool {
-    let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
-    encodings
-        .next()
-        .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        && encodings.next().is_none()
-}
-
 fn bounds(index: u64, length: u64) -> (u64, u64) {
     let start = index * CHUNK_BYTES;
     (start, CHUNK_BYTES.min(length - start))
@@ -197,28 +198,20 @@ fn fetch_part(
     client: &Client,
     directory: &Path,
     identity: &Identity,
+    payload: &Mutex<File>,
     index: u64,
     paused: &AtomicBool,
 ) -> Result<(), PartError> {
     let (start, size) = bounds(index, identity.length);
     let marker = directory.join(format!("part-{index}.sha256"));
-    let mut payload = File::options()
-        .read(true)
-        .write(true)
-        .open(directory.join("payload"))
-        .map_err(PartError::Write)?;
-    payload
-        .seek(SeekFrom::Start(start))
-        .map_err(PartError::Write)?;
     if let Ok(recorded) = fs::read_to_string(&marker) {
-        let existing = hash_part(&mut payload, size).map_err(PartError::Write)?;
-        if recorded == existing {
+        let mut file = payload.lock().expect("working file lock");
+        file.seek(SeekFrom::Start(start))
+            .map_err(PartError::Write)?;
+        if recorded == hash_part(&mut file, size).map_err(PartError::Write)? {
             return Ok(());
         }
         fs::remove_file(&marker).map_err(PartError::Write)?;
-        payload
-            .seek(SeekFrom::Start(start))
-            .map_err(PartError::Write)?;
     }
 
     let end = start + size - 1;
@@ -235,7 +228,7 @@ fn fetch_part(
     let headers = response.headers();
     if response.status() != StatusCode::PARTIAL_CONTENT
         || strong_etag(headers) != Some(&identity.etag)
-        || !unencoded(headers)
+        || !transfer::unencoded(headers)
         || headers
             .get(header::CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
@@ -250,7 +243,7 @@ fn fetch_part(
     {
         return Err(PartError::Changed);
     }
-    let mut hash = Sha256::new();
+    let mut data = Vec::with_capacity(size as usize);
     let mut block = [0; 64 * 1024];
     let mut remaining = size;
     while remaining > 0 {
@@ -264,10 +257,7 @@ fn fetch_part(
         if received == 0 {
             return Err(PartError::Interrupted);
         }
-        payload
-            .write_all(&block[..received])
-            .map_err(PartError::Write)?;
-        hash.update(&block[..received]);
+        data.extend_from_slice(&block[..received]);
         remaining -= received as u64;
     }
     if response
@@ -277,13 +267,15 @@ fn fetch_part(
     {
         return Err(PartError::Changed);
     }
-    payload.sync_data().map_err(PartError::Write)?;
-    save_marker(
-        directory,
-        &marker,
-        format!("{:x}", hash.finalize()).as_bytes(),
-    )
-    .map_err(PartError::Write)
+    {
+        let mut file = payload.lock().expect("working file lock");
+        file.seek(SeekFrom::Start(start))
+            .map_err(PartError::Write)?;
+        file.write_all(&data).map_err(PartError::Write)?;
+        file.sync_data().map_err(PartError::Write)?;
+    }
+    let digest = format!("{:x}", Sha256::digest(data));
+    save_marker(directory, &marker, digest.as_bytes()).map_err(PartError::Write)
 }
 
 fn hash_part(payload: &mut File, size: u64) -> io::Result<String> {

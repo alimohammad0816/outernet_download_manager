@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, ExitStatus},
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::Duration,
@@ -51,67 +51,77 @@ pub fn valid_name(name: &str) -> bool {
         })
 }
 
-pub fn download(url: &str, directory: &Path, paused: &AtomicBool) -> Result<(), String> {
+pub fn download(
+    url: &str,
+    directory: &Path,
+    has_expected_hash: bool,
+    paused: &AtomicBool,
+) -> Result<(), String> {
+    use reqwest::{header, StatusCode, Version};
     check_paused(paused)?;
     fs::create_dir(directory)
         .map_err(|error| format!("Cannot create the working folder: {error}"))?;
-    let mut command = Command::new("aria2c");
-    command.args([
-        "--no-conf",
-        "--input-file=-",
-        "--file-allocation=none",
-        "--auto-file-renaming=false",
-        "--allow-overwrite=false",
-        "--continue=false",
-        "--always-resume=true",
-        "--split=1",
-        "--max-connection-per-server=1",
-        "--max-tries=1",
-        "--follow-torrent=false",
-        "--follow-metalink=false",
-        "--http-accept-gzip=false",
-        "--check-certificate=true",
-        "--connect-timeout=15",
-        "--timeout=30",
-        &format!("--stop-with-process={}", std::process::id()),
-    ]);
-    command.arg("--dir").arg(directory);
-    #[cfg(windows)]
+    let client = http_client(true)?;
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|error| format!("Cannot start the file transfer: {}", error.without_url()))?;
+    let headers = response.headers();
+    if response.status() != StatusCode::OK
+        || !unencoded(headers)
+        || headers.contains_key(header::CONTENT_RANGE)
     {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        return Err(format!(
+            "The source did not return a complete file response ({}).",
+            response.status()
+        ));
     }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            format!("Cannot start aria2c. Install aria2 and make it available on PATH. ({error})")
-        })?;
-    let send = writeln!(
-        child.stdin.take().expect("piped stdin"),
-        "{url}\n  out=payload"
-    );
-    if let Err(error) = send {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("Cannot send the URL to aria2: {error}"));
+    let length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let chunked = headers
+        .get(header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("chunked"));
+    if length.is_none()
+        && !chunked
+        && !matches!(response.version(), Version::HTTP_2 | Version::HTTP_3)
+        && !has_expected_hash
+    {
+        return Err("The server did not provide a verifiable response length or framing. A publisher SHA-256 is required for this link.".into());
     }
-    let status = wait_for_child(&mut child, paused)
-        .map_err(|error| format!("Cannot wait for aria2: {error}"))?;
-    let file = directory.join("payload");
-    if !status.success() || !file.is_file() || directory.join("payload.aria2").exists() {
-        let detail = match status.code() {
-            Some(8) => "the server rejected the byte range",
-            Some(9) => "the working disk is full",
-            Some(13 | 14 | 15 | 16 | 17 | 18) => "aria2 could not write the download",
-            Some(3) => "the resource was unavailable",
-            _ => "the transfer did not finish",
-        };
-        return Err(format!("Download failed: {detail} ({status})."));
+    let mut file = File::options()
+        .create_new(true)
+        .write(true)
+        .open(directory.join("payload"))
+        .map_err(|error| format!("Cannot open the temporary file: {error}"))?;
+    let mut written = 0_u64;
+    let mut buffer = [0; 128 * 1024];
+    loop {
+        check_paused(paused)?;
+        let read = response
+            .read(&mut buffer)
+            .map_err(|_| "The file transfer ended before the response was complete.")?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("Cannot write the temporary file: {error}"))?;
+        written += read as u64;
+    }
+    if length.is_some_and(|length| length != written) {
+        return Err("The downloaded size differs from the server’s reported length.".into());
     }
     Ok(())
+}
+
+pub fn unencoded(headers: &reqwest::header::HeaderMap) -> bool {
+    let mut encodings = headers.get_all(reqwest::header::CONTENT_ENCODING).iter();
+    encodings
+        .next()
+        .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"))
+        && encodings.next().is_none()
 }
 
 pub fn sha256(path: &Path) -> io::Result<String> {
@@ -169,7 +179,6 @@ pub fn normalize_folder(path: PathBuf) -> Result<PathBuf, String> {
     }
     NamedTempFile::with_prefix_in(".outernet-check-", &folder)
         .map_err(|error| format!("Cannot write to the folder: {error}"))?;
-    // Preserve the user's normal path spelling, including ordinary Windows paths for aria2.
     Ok(path)
 }
 
