@@ -134,6 +134,9 @@ fn setup(destination_root: Option<&Path>) -> (TempDir, TempDir, PathBuf, Setting
         working_folder: work,
         destination_folder: destination.path().to_owned(),
         speed_limit_kib: None,
+        download_slots: 1,
+        keep_running: false,
+        notify_when_finished: false,
     };
     let store = Store::open(&database, settings.clone()).unwrap();
     (root, destination, database, settings, store)
@@ -156,6 +159,9 @@ fn downloads_exact_bytes_after_reopening_the_queue() {
             working_folder: new_work.clone(),
             destination_folder: new_work.clone(),
             speed_limit_kib: None,
+            download_slots: 1,
+            keep_running: false,
+            notify_when_finished: false,
         })
         .unwrap();
     drop(store);
@@ -207,13 +213,20 @@ fn schedule_survives_a_restart_and_holds_queued_transfers() {
     store
         .add(url, "scheduled.bin".into(), expected(32, 12))
         .unwrap();
-    store.schedule(Some(start)).unwrap();
+    let recurring = store::DailyWindow {
+        start_minute: 1320,
+        end_minute: 240,
+    };
+    store.schedule(Some(start), Some(recurring)).unwrap();
     assert!(!store.process_next().unwrap());
     drop(store);
 
     let store = Store::open(&database, settings.clone()).unwrap();
     store.recover().unwrap();
-    assert_eq!(store.snapshot().unwrap().run_after, Some(start));
+    let persisted = store.snapshot().unwrap();
+    assert_eq!(persisted.run_after, Some(start));
+    assert_eq!(persisted.daily_window.unwrap().start_minute, 1320);
+    assert_eq!(persisted.daily_window.unwrap().end_minute, 240);
     assert!(!store.process_next().unwrap());
     // A completed browser transfer can be published while new desktop transfers are waiting.
     let staged = settings.working_folder.join(".outernet-browser-fixture");
@@ -235,7 +248,7 @@ fn schedule_survives_a_restart_and_holds_queued_transfers() {
         [17; 8]
     );
     assert!(!store.process_next().unwrap());
-    store.schedule(None).unwrap();
+    store.schedule(None, None).unwrap();
     assert!(store.process_next().unwrap());
     server.join().unwrap().unwrap();
     assert_eq!(
@@ -533,6 +546,108 @@ fn reuses_only_verified_ranges_after_restart() {
     assert!(get.iter().any(|request| request
         .to_ascii_lowercase()
         .contains(&format!("range: bytes={PART}-"))));
+}
+
+#[test]
+fn priority_and_slots_keep_parallel_transfers_independent() {
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
+    use store::Priority;
+
+    let (_root, _destination, database, mut settings, store) = setup(None);
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let response_gate = Arc::clone(&gate);
+    let (request, arrivals) = mpsc::channel();
+    let fixture = Fixture::start(move |mut stream, raw| {
+        if raw.starts_with("HEAD ") {
+            let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        let name = raw
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .trim_start_matches('/');
+        let _ = request.send(name.to_string());
+        let (open, wake) = &*response_gate;
+        let _gate = wake
+            .wait_timeout_while(open.lock().unwrap(), Duration::from_secs(5), |open| !*open)
+            .unwrap();
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{name}",
+            name.len()
+        );
+    });
+    for (name, priority) in [
+        ("low.bin", Priority::Low),
+        ("normal.bin", Priority::Normal),
+        ("high-old.bin", Priority::High),
+        ("high-new.bin", Priority::High),
+    ] {
+        store
+            .add(fixture.url(name), name.into(), String::new())
+            .unwrap();
+        store.set_priority(job(&store).id, priority).unwrap();
+    }
+    settings.download_slots = 2;
+    store.settings(settings.clone()).unwrap();
+    drop(store);
+    let store = Arc::new(Store::open(&database, settings.clone()).unwrap());
+    assert_eq!(store.current_settings().unwrap().download_slots, 2);
+
+    let (complete, finished) = mpsc::channel();
+    let launch = || {
+        let complete = complete.clone();
+        store
+            .start_next(move |job| {
+                let _ = complete.send(job.filename);
+            })
+            .unwrap()
+    };
+    assert!(launch());
+    assert_eq!(
+        arrivals.recv_timeout(Duration::from_secs(3)).unwrap(),
+        "high-old.bin"
+    );
+    assert!(launch());
+    assert_eq!(
+        arrivals.recv_timeout(Duration::from_secs(3)).unwrap(),
+        "high-new.bin"
+    );
+    assert!(!launch());
+
+    let mut reduced = settings.clone();
+    reduced.download_slots = 1;
+    store.settings(reduced).unwrap();
+    assert!(!launch());
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    for _ in 0..2 {
+        let name = finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            fs::read(settings.destination_folder.join(&name)).unwrap(),
+            name.as_bytes()
+        );
+    }
+    assert!(launch());
+    assert_eq!(
+        arrivals.recv_timeout(Duration::from_secs(3)).unwrap(),
+        "normal.bin"
+    );
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "normal.bin"
+    );
+    assert!(launch());
+    assert_eq!(
+        arrivals.recv_timeout(Duration::from_secs(3)).unwrap(),
+        "low.bin"
+    );
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "low.bin"
+    );
+    assert!(!launch());
 }
 
 #[test]

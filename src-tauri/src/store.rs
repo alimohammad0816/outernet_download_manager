@@ -3,9 +3,11 @@ use crate::{
     progress::{TransferControl, TransferProgress, MAX_SPEED_KIB},
     ranges, transfer,
 };
+use chrono::{Local, Timelike};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs::{self, File},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -19,6 +21,25 @@ pub struct Settings {
     pub destination_folder: PathBuf,
     #[serde(default)]
     pub speed_limit_kib: Option<u32>,
+    #[serde(default = "default_slots")]
+    pub download_slots: u8,
+    #[serde(default)]
+    pub keep_running: bool,
+    #[serde(default)]
+    pub notify_when_finished: bool,
+}
+
+pub fn default_slots() -> u8 {
+    1
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -48,6 +69,8 @@ pub struct Job {
     pub expected_sha256: Option<String>,
     pub sha256: Option<String>,
     pub status: Status,
+    #[serde(default)]
+    pub priority: Priority,
     pub error: Option<String>,
     pub bytes: u64,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
@@ -90,15 +113,39 @@ pub struct Snapshot {
     pub jobs: Vec<Job>,
     #[serde(default)]
     pub run_after: Option<u64>,
+    #[serde(default)]
+    pub daily_window: Option<DailyWindow>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyWindow {
+    pub start_minute: u16,
+    pub end_minute: u16,
+}
+
+impl DailyWindow {
+    fn contains(self, minute: u16) -> bool {
+        if self.start_minute < self.end_minute {
+            (self.start_minute..self.end_minute).contains(&minute)
+        } else {
+            minute >= self.start_minute || minute < self.end_minute
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        self.start_minute < 1440 && self.end_minute < 1440 && self.start_minute != self.end_minute
+    }
 }
 
 pub struct Store {
     database: Mutex<Connection>,
-    worker: Mutex<Option<ActiveDownload>>,
+    workers: Mutex<HashMap<String, Arc<TransferControl>>>,
 }
 
-struct ActiveDownload {
-    id: String,
+#[derive(Clone)]
+struct ClaimedDownload {
+    job: Job,
     control: Arc<TransferControl>,
 }
 
@@ -116,6 +163,7 @@ impl Store {
             settings: defaults,
             jobs: Vec::new(),
             run_after: None,
+            daily_window: None,
         };
         let json = serde_json::to_string(&initial).map_err(db_error)?;
         connection
@@ -126,7 +174,7 @@ impl Store {
             .map_err(db_error)?;
         Ok(Self {
             database: Mutex::new(connection),
-            worker: Mutex::new(None),
+            workers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -145,14 +193,14 @@ impl Store {
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         let mut state = self.read()?.ok_or("Missing application state.")?;
-        let worker = self.worker.lock().map_err(db_error)?;
+        let worker = self.workers.lock().map_err(db_error)?;
         state.jobs = state
             .jobs
             .into_iter()
             .map(|mut job| {
                 if matches!(job.status, Status::Downloading | Status::Pausing) {
-                    if let Some(active) = worker.as_ref().filter(|active| active.id == job.id) {
-                        let progress = active.control.progress();
+                    if let Some(control) = worker.get(&job.id) {
+                        let progress = control.progress();
                         job.bytes = progress.completed_bytes;
                         job.transfer = Some(progress);
                         return job;
@@ -193,13 +241,17 @@ impl Store {
                 "Enter a speed limit between 1 and 1048576 KiB/s, or leave it blank.".into(),
             );
         }
+        if !(1..=8).contains(&settings.download_slots) {
+            return Err("Choose between one and eight simultaneous downloads.".into());
+        }
         let working_folder = transfer::normalize_folder(settings.working_folder)?;
+
         let destination_folder = transfer::normalize_folder(settings.destination_folder)?;
         self.update(|state| {
             state.settings = Settings {
                 working_folder,
                 destination_folder,
-                speed_limit_kib: settings.speed_limit_kib,
+                ..settings
             };
             Ok(())
         })
@@ -268,6 +320,7 @@ impl Store {
                     expected_sha256,
                     sha256: None,
                     status: Status::Queued,
+                    priority: Priority::Normal,
                     error: None,
                     bytes: 0,
                     transfer: None,
@@ -278,13 +331,45 @@ impl Store {
         })
     }
 
-    pub fn schedule(&self, run_after: Option<u64>) -> Result<(), String> {
+    pub fn current_settings(&self) -> Result<Settings, String> {
+        self.read()?
+            .map(|state| state.settings)
+            .ok_or_else(|| "Missing application state.".into())
+    }
+
+    pub fn set_priority(&self, id: String, priority: Priority) -> Result<(), String> {
+        let _workers = self.workers.lock().map_err(db_error)?;
+        self.update(|state| {
+            let job = state
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or("Download not found.")?;
+            if !matches!(job.status, Status::Queued | Status::Paused | Status::Failed) {
+                return Err(
+                    "Choose a queued, paused or failed download to change its priority.".into(),
+                );
+            }
+            job.priority = priority;
+            Ok(())
+        })
+    }
+
+    pub fn schedule(
+        &self,
+        run_after: Option<u64>,
+        daily_window: Option<DailyWindow>,
+    ) -> Result<(), String> {
         if run_after.is_some_and(|time| time <= unix_millis() || time > 8_640_000_000_000_000) {
             return Err("Choose a future start time.".into());
         }
-        let _worker = self.worker.lock().map_err(db_error)?;
+        if daily_window.is_some_and(|window| !window.is_valid()) {
+            return Err("Choose two distinct times for the daily schedule.".into());
+        }
+        let _workers = self.workers.lock().map_err(db_error)?;
         self.update(|state| {
             state.run_after = run_after;
+            state.daily_window = daily_window;
             Ok(())
         })
     }
@@ -312,6 +397,7 @@ impl Store {
                     expected_sha256: None,
                     sha256: Some(digest),
                     status: Status::Ready,
+                    priority: Priority::Normal,
                     error: None,
                     bytes,
                     transfer: None,
@@ -323,7 +409,7 @@ impl Store {
     }
 
     pub fn pause(&self, id: String) -> Result<(), String> {
-        let active = self.worker.lock().map_err(db_error)?;
+        let active = self.workers.lock().map_err(db_error)?;
         self.update(|state| {
             let job = state
                 .jobs
@@ -337,8 +423,8 @@ impl Store {
             };
             Ok(())
         })?;
-        if let Some(job) = active.as_ref().filter(|job| job.id == id) {
-            job.control.pause();
+        if let Some(control) = active.get(&id) {
+            control.pause();
         }
         Ok(())
     }
@@ -388,42 +474,90 @@ impl Store {
         Ok(())
     }
 
-    pub fn process_next(&self) -> Result<bool, String> {
-        let mut worker = self.worker.lock().map_err(db_error)?;
-        if worker.is_some() {
-            return Ok(false);
-        }
+    fn claim_next(&self) -> Result<Option<ClaimedDownload>, String> {
+        let mut workers = self.workers.lock().map_err(db_error)?;
         let snapshot = self.read()?.ok_or("Missing application state.")?;
-        let queue_due = snapshot.run_after.is_none_or(|time| time <= unix_millis());
-        let next =
-            snapshot.jobs.into_iter().rev().find(|job| {
-                job.status == Status::Ready || (queue_due && job.status == Status::Queued)
+        if workers.len() >= usize::from(snapshot.settings.download_slots) {
+            return Ok(None);
+        }
+        let queue_due = snapshot.run_after.is_none_or(|time| time <= unix_millis())
+            && snapshot.daily_window.is_none_or(|window| {
+                let local = Local::now();
+                window.contains((local.hour() * 60 + local.minute()) as u16)
             });
-        let Some(mut job) = next else {
-            return Ok(false);
+        let next = snapshot
+            .jobs
+            .into_iter()
+            .enumerate()
+            .filter(|(_, job)| {
+                !workers.contains_key(&job.id)
+                    && (job.status == Status::Ready || (queue_due && job.status == Status::Queued))
+            })
+            .max_by_key(|(index, job)| (job.status == Status::Ready, job.priority, *index));
+        let Some((_, mut job)) = next else {
+            return Ok(None);
         };
         let control = Arc::new(TransferControl::new(snapshot.settings.speed_limit_kib));
-        let pending_transfer = job.status == Status::Queued;
-        if pending_transfer {
+        if job.status == Status::Queued {
             job.status = Status::Downloading;
             job.attempt
                 .get_or_insert_with(|| Uuid::new_v4().to_string());
             self.save_job(&job)?;
         }
-        *worker = Some(ActiveDownload {
-            id: job.id.clone(),
-            control: Arc::clone(&control),
-        });
-        drop(worker);
+        workers.insert(job.id.clone(), Arc::clone(&control));
+        Ok(Some(ClaimedDownload { job, control }))
+    }
 
-        let outcome = if pending_transfer {
+    pub fn start_next(
+        self: &Arc<Self>,
+        completed: impl FnOnce(Job) + Send + 'static,
+    ) -> Result<bool, String> {
+        let Some(claim) = self.claim_next()? else {
+            return Ok(false);
+        };
+        let store = Arc::clone(self);
+        let started = claim.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("download".into())
+            .spawn(move || match store.process(started) {
+                Ok(Some(job)) => completed(job),
+                Ok(None) => {}
+                Err(error) => eprintln!("{error}"),
+            })
+        {
+            let mut workers = self.workers.lock().map_err(db_error)?;
+            workers.remove(&claim.job.id);
+            let mut job = claim.job;
+            if job.status == Status::Downloading {
+                job.status = Status::Queued;
+                self.save_job(&job)?;
+            }
+            return Err(format!("Cannot start a download worker: {error}"));
+        }
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub fn process_next(&self) -> Result<bool, String> {
+        let Some(claim) = self.claim_next()? else {
+            return Ok(false);
+        };
+        self.process(claim)?;
+        Ok(true)
+    }
+
+    fn process(
+        &self,
+        ClaimedDownload { mut job, control }: ClaimedDownload,
+    ) -> Result<Option<Job>, String> {
+        let outcome = if job.status == Status::Downloading {
             self.transfer(&mut job, &control)
                 .and_then(|()| self.publish(&mut job))
         } else {
             self.publish(&mut job)
         };
-        let mut worker = self.worker.lock().map_err(db_error)?;
-        *worker = None;
+        let mut workers = self.workers.lock().map_err(db_error)?;
+        workers.remove(&job.id);
         if let Err(error) = outcome {
             job.status = if control.is_paused() {
                 Status::Paused
@@ -435,8 +569,9 @@ impl Store {
                 let _ = fs::remove_dir_all(job.working_dir());
             }
             self.save_job(&job)?;
+            return Ok(None);
         }
-        Ok(true)
+        Ok(Some(job))
     }
 
     fn transfer(&self, job: &mut Job, control: &TransferControl) -> Result<(), String> {
@@ -467,7 +602,7 @@ impl Store {
         job.bytes = file.metadata().map_err(working_error)?.len();
         drop(file);
         {
-            let _worker = self.worker.lock().map_err(db_error)?;
+            let _worker = self.workers.lock().map_err(db_error)?;
             control.check()?;
             job.status = Status::Verifying;
             self.save_job(job)?;
@@ -573,4 +708,33 @@ fn db_error(error: impl std::fmt::Display) -> String {
 
 fn working_error(error: std::io::Error) -> String {
     format!("Cannot verify the working file: {error}")
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::DailyWindow;
+
+    #[test]
+    fn windows_include_the_start_exclude_the_end_and_cross_midnight() {
+        let daytime = DailyWindow {
+            start_minute: 420,
+            end_minute: 600,
+        };
+        assert!(!daytime.contains(419));
+        assert!(daytime.contains(420));
+        assert!(!daytime.contains(600));
+        let overnight = DailyWindow {
+            start_minute: 1380,
+            end_minute: 180,
+        };
+        assert!(!overnight.contains(1379));
+        assert!(overnight.contains(1439));
+        assert!(overnight.contains(0));
+        assert!(!overnight.contains(180));
+        assert!(!DailyWindow {
+            start_minute: 0,
+            end_minute: 0
+        }
+        .is_valid());
+    }
 }

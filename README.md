@@ -63,11 +63,24 @@ Outernet assembles these streams into Matroska (`.mkv`).
 
 ## Schedule the queue
 
-Open **Queue schedule** to hold queued desktop transfers until a local date
-and time. The schedule survives app restarts. Keep Outernet running for the
-queue to start at the selected time, or choose **Run queue now** to release it
-early. Active transfers continue, and browser-session handoffs already in
-progress can be saved while the desktop queue is waiting.
+Open **Queue schedule** to hold the queue until a local date and time, allow
+new transfers only during a daily time window, or combine both. A daily
+window can cross midnight. Schedules survive app restarts. **Clear schedule**
+releases the queue. Active transfers and publication of already received files
+continue outside the window.
+
+Set **Simultaneous downloads** in Settings. New jobs start in priority order,
+with older jobs first among equal priorities. Lowering the limit lets active
+downloads finish before new ones start. Change a queued, paused, or failed
+download's priority in its row. The default is one simultaneous desktop
+transfer.
+
+Enable **Keep running in the system tray when closed** to let the queue progress
+after closing the window. Open Outernet from the tray or launch it again to
+restore the window. **Quit Outernet** in the tray exits the application.
+**Notify me when a download completes** sends an OS notification once the
+verified file has been published. The operating system controls notification
+visibility, and Linux desktops need a system-tray host to display the tray icon.
 
 ## Storage and integrity
 

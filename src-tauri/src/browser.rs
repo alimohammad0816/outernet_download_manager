@@ -124,7 +124,7 @@ fn receive(
     if length > 9_007_199_254_740_991 {
         return Err("This response length is outside the supported range.".into());
     }
-    let settings = store.snapshot()?.settings;
+    let settings = store.current_settings()?;
     let control = TransferControl::new(settings.speed_limit_kib);
     let chunk_bytes = control.chunk_bytes(32 * 1024);
     let temporary = tempfile::Builder::new()
@@ -376,6 +376,9 @@ mod tests {
             working_folder: root.path().join("work"),
             destination_folder: root.path().join("destination"),
             speed_limit_kib: None,
+            download_slots: 1,
+            keep_running: false,
+            notify_when_finished: false,
         };
         fs::create_dir(&settings.working_folder).unwrap();
         fs::create_dir(&settings.destination_folder).unwrap();

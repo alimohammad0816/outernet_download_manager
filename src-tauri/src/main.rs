@@ -8,8 +8,13 @@ mod store;
 mod transfer;
 
 use std::{fs, io, path::Path, sync::Arc, time::Duration};
-use store::{Settings, Snapshot, Store};
-use tauri::{Manager, State};
+use store::{DailyWindow, Priority, Settings, Snapshot, Store};
+use tauri::{
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, State, WindowEvent,
+};
+use tauri_plugin_notification::NotificationExt;
 
 #[tauri::command]
 async fn snapshot(store: State<'_, Arc<Store>>) -> Result<Snapshot, String> {
@@ -17,7 +22,14 @@ async fn snapshot(store: State<'_, Arc<Store>>) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-async fn save_settings(store: State<'_, Arc<Store>>, settings: Settings) -> Result<(), String> {
+async fn save_settings(
+    app: AppHandle,
+    store: State<'_, Arc<Store>>,
+    settings: Settings,
+) -> Result<(), String> {
+    if settings.keep_running && app.tray_by_id(TRAY_ID).is_none() {
+        return Err("The system tray is unavailable on this desktop.".into());
+    }
     store.settings(settings)
 }
 
@@ -41,6 +53,7 @@ async fn pause_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), 
     store.pause(id)
 }
 
+const TRAY_ID: &str = "outernet-tray";
 const APP_ID: &str = "io.outernet.downloadmanager";
 
 fn open_store(data: &Path) -> Result<Store, io::Error> {
@@ -57,6 +70,9 @@ fn open_store(data: &Path) -> Result<Store, io::Error> {
             working_folder,
             destination_folder,
             speed_limit_kib: None,
+            download_slots: 1,
+            keep_running: false,
+            notify_when_finished: false,
         },
     )
     .map_err(io::Error::other)
@@ -71,8 +87,59 @@ async fn connect_browser(browser: String) -> Result<(), String> {
 async fn schedule_queue(
     store: State<'_, Arc<Store>>,
     run_after: Option<u64>,
+    daily_window: Option<DailyWindow>,
 ) -> Result<(), String> {
-    store.schedule(run_after)
+    store.schedule(run_after, daily_window)
+}
+
+#[tauri::command]
+async fn set_priority(
+    store: State<'_, Arc<Store>>,
+    id: String,
+    priority: Priority,
+) -> Result<(), String> {
+    store.set_priority(id, priority)
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn install_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = MenuBuilder::new(app)
+        .text("show", "Open Outernet")
+        .text("quit", "Quit Outernet")
+        .build()?;
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .tooltip("Outernet Download Manager")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 fn main() {
@@ -84,21 +151,52 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            show_main(app)
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if window.label() == "main"
+                    && app.tray_by_id(TRAY_ID).is_some()
+                    && app
+                        .state::<Arc<Store>>()
+                        .current_settings()
+                        .is_ok_and(|settings| settings.keep_running)
+                    && window.hide().is_ok()
+                {
+                    api.prevent_close();
+                }
+            }
+        })
         .setup(|app| {
             let data = app.path().app_local_data_dir()?;
             let store = Arc::new(open_store(&data)?);
             store.recover().map_err(io::Error::other)?;
             app.manage(Arc::clone(&store));
+            if let Err(error) = install_tray(app.handle()) {
+                eprintln!("System tray unavailable: {error}");
+            }
+            let app_handle = app.handle().clone();
             std::thread::Builder::new()
                 .name("downloads".into())
                 .spawn(move || loop {
-                    match store.process_next() {
+                    let notifications = app_handle.clone();
+                    let settings = Arc::clone(&store);
+                    match store.start_next(move |job| {
+                        if settings
+                            .current_settings()
+                            .is_ok_and(|current| current.notify_when_finished)
+                        {
+                            let _ = notifications
+                                .notification()
+                                .builder()
+                                .title("Download complete")
+                                .body(job.filename)
+                                .show();
+                        }
+                    }) {
                         Ok(true) => continue,
                         Ok(false) => {}
                         Err(error) => eprintln!("{error}"),
@@ -114,7 +212,8 @@ fn main() {
             retry_download,
             pause_download,
             connect_browser,
-            schedule_queue
+            schedule_queue,
+            set_priority
         ])
         .run(tauri::generate_context!())
         .expect("Outernet could not start");

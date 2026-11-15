@@ -5,7 +5,16 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-type Settings = { workingFolder: string; destinationFolder: string; speedLimitKib: number | null };
+type Settings = {
+  workingFolder: string;
+  destinationFolder: string;
+  speedLimitKib: number | null;
+  downloadSlots: number;
+  keepRunning: boolean;
+  notifyWhenFinished: boolean;
+};
+type Priority = "low" | "normal" | "high";
+type DailyWindow = { startMinute: number; endMinute: number };
 type TransferProgress = { totalBytes: number | null; completedBytes: number; bytesPerSecond: number };
 type Status = "queued" | "downloading" | "pausing" | "paused" | "verifying" | "ready" | "complete" | "failed";
 type Job = {
@@ -13,13 +22,14 @@ type Job = {
   url: string;
   filename: string;
   status: Status;
+  priority: Priority;
   expectedSha256: string | null;
   sha256: string | null;
   error: string | null;
   bytes: number;
   transfer?: TransferProgress;
 };
-type Snapshot = { settings: Settings; jobs: Job[]; run_after: number | null };
+type Snapshot = { settings: Settings; jobs: Job[]; run_after: number | null; daily_window: DailyWindow | null };
 type Filter = "all" | "complete" | "failed";
 type Panel = "add" | "settings" | "browser" | "schedule";
 
@@ -200,6 +210,14 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
             placeholder="Unlimited" value={limit} onChange={event => setLimit(event.target.value)} aria-describedby="speed-limit-help" />
           <small id="speed-limit-help">Applies when a transfer starts. Leave blank for unlimited speed.</small>
         </div>
+        <label>Simultaneous downloads
+          <input type="number" min="1" max="8" step="1" required value={paths.downloadSlots}
+            onChange={event => setPaths({ ...paths, downloadSlots: event.target.valueAsNumber })} />
+        </label>
+        <label className="checkbox"><input type="checkbox" checked={paths.keepRunning}
+          onChange={event => setPaths({ ...paths, keepRunning: event.target.checked })} /> Keep running in the system tray when closed</label>
+        <label className="checkbox"><input type="checkbox" checked={paths.notifyWhenFinished}
+          onChange={event => setPaths({ ...paths, notifyWhenFinished: event.target.checked })} /> Notify me when a download completes</label>
         <FormActions busy={busy} error={error} onClose={onClose} label="Save settings" />
       </form>
     </Modal>
@@ -247,17 +265,33 @@ function toLocalTime(epoch: number) {
   return new Date(epoch - time.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-function ScheduleForm({ runAfter, onClose, onSave }: { runAfter: number | null; onClose: () => void; onSave: () => Promise<void> }) {
+function formatTime(minute: number) {
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+function toMinutes(clock: string) {
+  const [hours, minutes] = clock.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
+  runAfter: number | null; dailyWindow: DailyWindow | null; onClose: () => void; onSave: () => Promise<void>;
+}) {
   const [date, setDate] = useState(runAfter && runAfter > Date.now() ? toLocalTime(runAfter) : "");
+  const [start, setStart] = useState(dailyWindow ? formatTime(dailyWindow.startMinute) : "");
+  const [end, setEnd] = useState(dailyWindow ? formatTime(dailyWindow.endMinute) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function save(epoch: number | null) {
+  async function save(clear = false) {
     setBusy(true);
     setError("");
     try {
+      const epoch = !clear && date ? new Date(date).getTime() : null;
       if (epoch !== null && (!Number.isFinite(epoch) || epoch <= Date.now())) throw new Error("Choose a future start time.");
-      await invoke("schedule_queue", { runAfter: epoch });
+      if (!clear && Boolean(start) !== Boolean(end)) throw new Error("Choose both daily times.");
+      const window = !clear && start && end ? { startMinute: toMinutes(start), endMinute: toMinutes(end) } : null;
+      await invoke("schedule_queue", { runAfter: epoch, dailyWindow: window });
       await onSave();
       onClose();
     } catch (failure) {
@@ -269,11 +303,16 @@ function ScheduleForm({ runAfter, onClose, onSave }: { runAfter: number | null; 
 
   return (
     <Modal title="Queue schedule" onClose={onClose}>
-      <form onSubmit={event => { event.preventDefault(); void save(new Date(date).getTime()); }}>
-        <p className="muted">Choose a local time for queued desktop transfers. Keep Outernet open for the queue to start at that time.</p>
-        <label>Start queue at<input type="datetime-local" data-initial-focus value={date} onChange={event => setDate(event.target.value)} required /></label>
-        <button type="button" className="button secondary" disabled={busy} onClick={() => void save(null)}>Run queue now</button>
-        <FormActions busy={busy} error={error} onClose={onClose} label="Schedule queue" />
+      <form onSubmit={event => { event.preventDefault(); void save(); }}>
+        <p className="muted">Set when new queued transfers can start. Keep Outernet running to start them on schedule.</p>
+        <label>Hold until <span>Optional</span><input type="datetime-local" data-initial-focus value={date} onChange={event => setDate(event.target.value)} /></label>
+        <div className="schedule-times">
+          <label>Daily start<input type="time" value={start} onChange={event => setStart(event.target.value)} /></label>
+          <label>Daily end<input type="time" value={end} onChange={event => setEnd(event.target.value)} /></label>
+        </div>
+        <small>Leave both daily times blank for all-day downloads.</small>
+        <button type="button" className="button secondary" disabled={busy} onClick={() => void save(true)}>Clear schedule</button>
+        <FormActions busy={busy} error={error} onClose={onClose} label="Save schedule" />
       </form>
     </Modal>
   );
@@ -316,6 +355,17 @@ function App() {
     }
   }
 
+  async function setPriority(id: string, priority: Priority) {
+    setActionError("");
+    try {
+      await invoke("set_priority", { id, priority });
+      await refresh();
+    } catch (failure) {
+      setActionError(describe(failure));
+      await refresh();
+    }
+  }
+
   const jobs = state?.jobs ?? [];
   const visible = jobs.filter(job => filter === "all" || job.status === filter);
   const heading = filters.find(item => item.key === filter)?.label;
@@ -352,6 +402,11 @@ function App() {
             <CalendarClock size={16} /> Queue starts at {new Date(state.run_after).toLocaleString()}
           </button>
         )}
+        {state?.daily_window && (
+          <button className="button secondary schedule-notice" onClick={() => setPanel("schedule")}>
+            <CalendarClock size={16} /> Daily queue window {formatTime(state.daily_window.startMinute)}–{formatTime(state.daily_window.endMinute)}
+          </button>
+        )}
         <section className="download-list" aria-label={heading}>
           <table>
             <thead><tr><th>File</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>
@@ -361,6 +416,16 @@ function App() {
                   <td>
                     <strong className="filename" title={job.filename}>{job.filename}</strong>
                     <small>{hostname(job.url)}</small>
+                    {(job.status === "queued" || job.status === "paused" || job.status === "failed") && (
+                      <label className="priority-control">Priority
+                        <select value={job.priority} aria-label={`Priority for ${job.filename}`}
+                          onChange={event => void setPriority(job.id, event.target.value as Priority)}>
+                          <option value="low">Low</option>
+                          <option value="normal">Normal</option>
+                          <option value="high">High</option>
+                        </select>
+                      </label>
+                    )}
                     {job.transfer && <DownloadProgress transfer={job.transfer} />}
                     {job.error && <small className="error">{job.error}</small>}
                   </td>
@@ -396,7 +461,7 @@ function App() {
         </section>
         {state && <footer><HardDrive size={15} /><button title={state.settings.workingFolder} onClick={() => setPanel("settings")}>In progress · {state.settings.workingFolder}</button></footer>}
       </main>
-      {panel === "schedule" && state && <ScheduleForm runAfter={state.run_after} onClose={closePanel} onSave={refresh} />}
+      {panel === "schedule" && state && <ScheduleForm runAfter={state.run_after} dailyWindow={state.daily_window} onClose={closePanel} onSave={refresh} />}
       {panel === "browser" && <BrowserSettings onClose={closePanel} />}
       {panel === "add" && <AddDownload onClose={closePanel} onSave={refresh} />}
       {panel === "settings" && state && <SettingsForm settings={state.settings} onClose={closePanel} onSave={refresh} />}

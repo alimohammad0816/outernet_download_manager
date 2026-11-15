@@ -109,3 +109,11 @@ input { display: block; min-width: 0; width: 100%; height: 37px; padding: 0 9px;
 .download-progress { margin-top: 6px; max-width: 24rem; }
 .download-progress progress { display: block; width: 100%; height: 6px; accent-color: var(--primary); }
 .download-progress small { font-variant-numeric: tabular-nums; }
+
+dialog { max-height: calc(100vh - 32px); overflow: auto; }
+.checkbox { display: flex; align-items: flex-start; gap: 8px; }
+.checkbox input { margin: 2px 0 0; width: auto; height: auto; flex: none; }
+.schedule-times { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.schedule-notice + .schedule-notice { margin-left: 6px; }
+.priority-control { display: flex; width: fit-content; margin-top: 4px; align-items: center; gap: 6px; font-size: .8rem; color: var(--muted); }
+.priority-control select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
