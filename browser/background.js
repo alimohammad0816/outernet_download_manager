@@ -1,16 +1,20 @@
+import { receiveWithBrowser, trackDownloads, rememberAttachment } from "./handoff.js";
+const api = globalThis.browser ?? globalThis.chrome;
 const HOST = "io.outernet.downloadmanager";
 const MENU = "outernet-download";
+const SESSION_MENU = "outernet-session";
 const MAX_STREAMS = 12;
 const networkOperations = new Map();
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: MENU,
-    title: "Download with Outernet",
-    contexts: ["link", "video", "audio"],
-    targetUrlPatterns: ["http://*/*", "https://*/*"],
-  });
+api.runtime.onInstalled.addListener(() => {
+  for (const [id, title] of [[MENU, "Download with Outernet"], [SESSION_MENU, "Download with Outernet using site session"]]) {
+    api.contextMenus.create({
+      id, title, contexts: ["link", "video", "audio"],
+      targetUrlPatterns: ["http://*/*", "https://*/*"],
+    });
+  }
 });
+trackDownloads(api, HOST);
 
 function webUrl(input) {
   try {
@@ -26,7 +30,7 @@ function webUrl(input) {
 
 async function requestHost(message) {
   try {
-    return await chrome.runtime.sendNativeMessage(HOST, message);
+    return await api.runtime.sendNativeMessage(HOST, message);
   } catch (error) {
     return { ok: false, error: `Cannot reach Outernet. Connect this browser in Outernet settings. (${error.message})` };
   }
@@ -35,21 +39,38 @@ async function requestHost(message) {
 async function download(tabId, source) {
   const url = webUrl(source.url);
   const { maxHeight } = source.format && source.format !== "file"
-    ? await chrome.storage.local.get("maxHeight") : {};
-  const response = url
-    ? await requestHost({ action: "download", url, filename: source.filename, format: source.format, max_height: maxHeight })
-    : { ok: false, error: "Choose a direct HTTP or HTTPS media source." };
+    ? await api.storage.local.get("maxHeight") : {};
+  let response;
+  if (!url) {
+    response = { ok: false, error: "Choose a direct HTTP or HTTPS media source." };
+  } else if (source.session) {
+    try {
+      if (source.format !== "file") throw new Error("Choose a direct file to download using a site session.");
+      if (Number.isInteger(tabId) && tabId >= 0) {
+        await api.storage.session.set({ [`result:${tabId}`]: { pending: true } });
+        await api.action.setBadgeText({ tabId, text: "↓" }).catch(() => {});
+      }
+      await receiveWithBrowser(api, HOST, url, { filename: source.filename });
+      response = { ok: true };
+    } catch (error) {
+      response = { ok: false, error: error.message };
+    }
+  } else {
+    response = await requestHost({ action: "download", url, filename: source.filename, format: source.format, max_height: maxHeight });
+  }
   if (Number.isInteger(tabId) && tabId >= 0) {
-    await chrome.storage.session.set({ [`result:${tabId}`]: response });
-    await chrome.action.setBadgeText({ tabId, text: response.ok ? "" : "!" }).catch(() => {});
+    await api.storage.session.set({ [`result:${tabId}`]: response });
+    await api.action.setBadgeText({ tabId, text: response.ok ? "" : "!" }).catch(() => {});
   }
   return response;
 }
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === MENU) {
-    const url = info.srcUrl || info.linkUrl;
-    if (url) void download(tab?.id, { url, format: streamFormat(url) || "file" });
+api.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== MENU && info.menuItemId !== SESSION_MENU) return;
+  const url = info.srcUrl || info.linkUrl;
+  const session = info.menuItemId === SESSION_MENU;
+  if (url && !(session && tab?.incognito)) {
+    void download(tab?.id, { url, session, format: streamFormat(url) || "file" });
   }
 });
 
@@ -67,8 +88,8 @@ function updateStreams(tabId, change) {
   const key = `streams:${tabId}`;
   const current = networkOperations.get(tabId) ?? Promise.resolve();
   const next = current.catch(() => {}).then(async () => {
-    const stored = (await chrome.storage.session.get(key))[key] ?? [];
-    await chrome.storage.session.set({ [key]: change(stored) });
+    const stored = (await api.storage.session.get(key))[key] ?? [];
+    await api.storage.session.set({ [key]: change(stored) });
   });
   networkOperations.set(tabId, next);
   const finish = () => {
@@ -77,8 +98,10 @@ function updateStreams(tabId, change) {
   void next.then(finish, finish);
 }
 
-chrome.webRequest.onHeadersReceived.addListener(details => {
-  if (details.tabId < 0 || details.method !== "GET" || details.statusCode < 200 || details.statusCode >= 300) return;
+api.webRequest.onHeadersReceived.addListener(details => {
+  if (details.method !== "GET" || details.statusCode !== 200) return;
+  rememberAttachment(details);
+  if (details.tabId < 0) return;
   const format = streamFormat(details.url, details.responseHeaders);
   if (!format) return;
   const entry = { url: details.url, format, frameId: details.frameId };
@@ -86,26 +109,26 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
     entry,
     ...streams.filter(item => item.url !== entry.url || item.frameId !== entry.frameId),
   ].slice(0, MAX_STREAMS));
-}, { urls: ["http://*/*", "https://*/*"], types: ["media", "xmlhttprequest", "other"] }, ["responseHeaders"]);
+}, { urls: ["http://*/*", "https://*/*"], types: ["main_frame", "sub_frame", "media", "xmlhttprequest", "other"] }, ["responseHeaders"]);
 
-chrome.tabs.onUpdated.addListener((tabId, change) => {
+api.tabs.onUpdated.addListener((tabId, change) => {
   if (change.status === "loading") updateStreams(tabId, () => []);
 });
-chrome.tabs.onRemoved.addListener(tabId => {
+api.tabs.onRemoved.addListener(tabId => {
   void (networkOperations.get(tabId) ?? Promise.resolve()).catch(() => {}).then(() =>
-    chrome.storage.session.remove([`streams:${tabId}`, `result:${tabId}`]));
+    api.storage.session.remove([`streams:${tabId}`, `result:${tabId}`]));
 });
 
-chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  const extensionPage = sender.url?.startsWith(chrome.runtime.getURL(""));
+api.runtime.onMessage.addListener((message, sender, respond) => {
+  const extensionPage = sender.url?.startsWith(api.runtime.getURL(""));
   const tabId = extensionPage ? message.tabId : sender.tab?.id;
   if (message.action === "ping" && extensionPage) {
     void requestHost({ action: "ping" }).then(respond);
-  } else if (message.action === "download") {
+  } else if (message.action === "download" && !message.session) {
     void download(tabId, message).then(respond, () => respond({ ok: false, error: "Could not send this download." }));
   } else if (message.action === "streams" && Number.isInteger(tabId) && tabId >= 0) {
     const key = `streams:${tabId}`;
-    void chrome.storage.session.get([key, `result:${tabId}`]).then(data => {
+    void api.storage.session.get([key, `result:${tabId}`]).then(data => {
       const items = data[key] ?? [];
       respond({
         streams: extensionPage ? items : items.filter(item => item.frameId === sender.frameId),

@@ -1,23 +1,37 @@
-use crate::{media::Format, open_store, transfer, APP_ID};
+use crate::{media::Format, open_store, store::Store, transfer, APP_ID};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    ffi::OsString,
+    fs::{self, File},
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 use tempfile::NamedTempFile;
 
 const HOST: &str = "io.outernet.downloadmanager";
 const EXTENSION_ID: &str = include_str!("../browser-extension-id");
+const FIREFOX_ID: &str = include_str!("../firefox-extension-id");
 const MAX_MESSAGE: usize = 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Request {
     Ping,
+    Receive {
+        url: String,
+        filename: Option<String>,
+        length: u64,
+    },
+    Chunk {
+        bytes: String,
+    },
+    Finish,
+    Abort,
     Download {
         url: String,
         filename: Option<String>,
@@ -30,29 +44,152 @@ fn allowed_origin() -> String {
     format!("chrome-extension://{}/", EXTENSION_ID.trim())
 }
 
+pub fn launch_origin(mut args: impl Iterator<Item = OsString>) -> Option<String> {
+    let first = args.next()?;
+    if first.to_string_lossy().starts_with("chrome-extension://") {
+        return Some(first.to_string_lossy().into_owned());
+    }
+    let manifest = Path::new(&first);
+    if manifest.is_absolute()
+        && manifest
+            .file_name()
+            .is_some_and(|file| file == format!("{HOST}.json").as_str())
+    {
+        return Some(
+            args.next()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    None
+}
+
 pub fn run_host(origin: &str) -> io::Result<()> {
-    if origin != allowed_origin() {
+    if origin != allowed_origin() && origin != FIREFOX_ID.trim() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Unknown extension origin.",
         ));
     }
-    let request = read_request(io::stdin().lock());
-    let outcome = request.and_then(handle_request);
-    let success = outcome.as_ref().is_ok_and(|launch| *launch);
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    let outcome = match read_request(&mut input) {
+        Ok(Request::Receive {
+            url,
+            filename,
+            length,
+        }) => browser_store()
+            .and_then(|store| receive(&store, &url, filename, length, &mut input, &mut output))
+            .map(|()| true),
+        Ok(request) => handle_request(request),
+        Err(error) => Err(error),
+    };
+    let launch = outcome.as_ref().is_ok_and(|launch| *launch);
     let message = match outcome {
         Ok(_) => json!({ "ok": true }),
         Err(error) => json!({ "ok": false, "error": error }),
     };
-    write_response(io::stdout().lock(), &message)?;
-    if success {
+    // Publish a durably queued transfer even if the browser closes its pipe before reading the acknowledgment.
+    let response = write_response(&mut output, &message);
+    if launch {
         Command::new(std::env::current_exe()?)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
     }
+    response
+}
+
+fn browser_store() -> Result<Store, String> {
+    let data = dirs::data_local_dir()
+        .ok_or("Cannot locate the Outernet data directory.")?
+        .join(APP_ID);
+    open_store(&data).map_err(|error| error.to_string())
+}
+
+fn receive(
+    store: &Store,
+    url: &str,
+    filename: Option<String>,
+    length: u64,
+    mut input: impl Read,
+    mut output: impl Write,
+) -> Result<(), String> {
+    let mut parsed = transfer::parse_url(url)?;
+    let filename = download_name(&parsed, filename);
+    // The received bytes, rather than a credential-bearing URL, are the retry source.
+    parsed.set_query(None);
+    if length > 9_007_199_254_740_991 {
+        return Err("This response length is outside the supported range.".into());
+    }
+    let settings = store.snapshot()?.settings;
+    let temporary = tempfile::Builder::new()
+        .prefix(".outernet-")
+        .tempdir_in(&settings.working_folder)
+        .map_err(receive_error)?;
+    let attempt = temporary
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".outernet-"))
+        .ok_or("Cannot identify the working folder.")?
+        .to_string();
+    let mut payload = File::create(temporary.path().join("payload")).map_err(receive_error)?;
+    write_response(&mut output, &json!({ "ok": true })).map_err(receive_error)?;
+    let mut written = 0;
+    let mut hash = Sha256::new();
+    loop {
+        match read_request(&mut input)? {
+            Request::Chunk { bytes } => {
+                let bytes = STANDARD
+                    .decode(bytes)
+                    .map_err(|_| "Invalid browser data chunk.")?;
+                if bytes.is_empty()
+                    || bytes.len() > 32 * 1024
+                    || bytes.len() as u64 > length - written
+                {
+                    return Err("The browser sent more bytes than expected.".into());
+                }
+                payload.write_all(&bytes).map_err(receive_error)?;
+                hash.update(&bytes);
+                written += bytes.len() as u64;
+                write_response(&mut output, &json!({ "ok": true })).map_err(receive_error)?;
+            }
+            Request::Abort => return Err("The browser ended the transfer.".into()),
+            Request::Finish if written == length => break,
+            Request::Finish => {
+                return Err("The browser response ended before the declared length.".into())
+            }
+            _ => return Err("Unexpected browser transfer message.".into()),
+        }
+    }
+    payload.sync_all().map_err(receive_error)?;
+    drop(payload);
+    #[cfg(unix)]
+    {
+        File::open(temporary.path())
+            .and_then(|directory| directory.sync_all())
+            .map_err(receive_error)?;
+        File::open(&settings.working_folder)
+            .and_then(|directory| directory.sync_all())
+            .map_err(receive_error)?;
+    }
+    store.complete_browser_transfer(
+        parsed.into(),
+        filename,
+        settings,
+        attempt,
+        written,
+        format!("{:x}", hash.finalize()),
+    )?;
+    let _ = temporary.keep();
     Ok(())
+}
+
+fn receive_error(error: io::Error) -> String {
+    format!("Cannot save the browser transfer: {error}")
 }
 
 fn read_request(mut input: impl Read) -> Result<Request, String> {
@@ -79,33 +216,35 @@ fn write_response(mut output: impl Write, message: &Value) -> io::Result<()> {
 }
 
 fn handle_request(request: Request) -> Result<bool, String> {
-    let Request::Download {
-        url,
-        filename,
-        format,
-        max_height,
-    } = request
-    else {
-        return Ok(false);
-    };
-    let parsed = transfer::parse_url(&url)?;
-    let leaf = parsed
+    match request {
+        Request::Ping => Ok(false),
+        Request::Download {
+            url,
+            filename,
+            format,
+            max_height,
+        } => {
+            let parsed = transfer::parse_url(&url)?;
+            let filename = download_name(&parsed, filename);
+            browser_store()?.add_from_browser(parsed.into(), filename, format, max_height)?;
+            Ok(true)
+        }
+        _ => Err("Start a browser transfer before sending data.".into()),
+    }
+}
+
+fn download_name(url: &url::Url, filename: Option<String>) -> String {
+    let leaf = url
         .path_segments()
         .and_then(|mut parts| parts.next_back())
         .unwrap_or_default();
-    let filename = filename
+    filename
         .filter(|name| transfer::valid_name(name))
         .or_else(|| {
             let decoded = percent_decode_str(leaf).decode_utf8().ok()?;
             transfer::valid_name(&decoded).then(|| decoded.into_owned())
         })
-        .unwrap_or_else(|| "download".into());
-    let data = dirs::data_local_dir()
-        .ok_or("Cannot locate the Outernet data directory.")?
-        .join(APP_ID);
-    let store = open_store(&data).map_err(|error| error.to_string())?;
-    store.add_from_browser(parsed.into(), filename, format, max_height)?;
-    Ok(true)
+        .unwrap_or_else(|| "download".into())
 }
 
 pub fn register(browser: &str) -> Result<(), String> {
@@ -113,22 +252,31 @@ pub fn register(browser: &str) -> Result<(), String> {
         "chrome" => ("google-chrome", "Google\\Chrome"),
         "edge" => ("microsoft-edge", "Microsoft\\Edge"),
         "chromium" => ("chromium", "Chromium"),
-        _ => return Err("Choose Chrome, Edge or Chromium.".into()),
+        "firefox" => (".mozilla", "Mozilla"),
+        _ => return Err("Choose Chrome, Edge, Chromium or Firefox.".into()),
     };
     let directory: PathBuf;
     #[cfg(target_os = "linux")]
     {
-        directory = dirs::config_dir()
-            .ok_or("Cannot locate browser configuration.")?
-            .join(profile.0)
-            .join("NativeMessagingHosts");
+        directory = if browser == "firefox" {
+            dirs::home_dir()
+                .ok_or("Cannot locate Firefox configuration.")?
+                .join(profile.0)
+                .join("native-messaging-hosts")
+        } else {
+            dirs::config_dir()
+                .ok_or("Cannot locate browser configuration.")?
+                .join(profile.0)
+                .join("NativeMessagingHosts")
+        };
     }
     #[cfg(target_os = "windows")]
     {
         directory = dirs::data_local_dir()
             .ok_or("Cannot locate Outernet configuration.")?
             .join(APP_ID)
-            .join("browser");
+            .join("browser")
+            .join(browser);
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
@@ -138,13 +286,18 @@ pub fn register(browser: &str) -> Result<(), String> {
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Cannot create browser configuration: {error}"))?;
     let path = directory.join(format!("{HOST}.json"));
-    let manifest = json!({
+    let mut manifest = json!({
         "name": HOST,
         "description": "Outernet Download Manager",
         "path": std::env::current_exe().map_err(|error| format!("Cannot locate Outernet: {error}"))?,
         "type": "stdio",
-        "allowed_origins": [allowed_origin()],
+
     });
+    if browser == "firefox" {
+        manifest["allowed_extensions"] = json!([FIREFOX_ID.trim()]);
+    } else {
+        manifest["allowed_origins"] = json!([allowed_origin()]);
+    }
     let mut staged = NamedTempFile::new_in(&directory).map_err(|error| error.to_string())?;
     serde_json::to_writer_pretty(staged.as_file_mut(), &manifest)
         .map_err(|error| error.to_string())?;
@@ -188,5 +341,66 @@ mod tests {
         ));
         assert!(read_request(u32::MAX.to_ne_bytes().as_slice()).is_err());
         assert!(read_request([4, 0, 0, 0, b'{'].as_slice()).is_err());
+    }
+
+    #[test]
+    fn firefox_origin_uses_the_manifest_path_and_extension_id() {
+        let manifest = std::env::current_dir()
+            .unwrap()
+            .join(format!("{HOST}.json"));
+        let args = [manifest.into_os_string(), FIREFOX_ID.trim().into()];
+        assert_eq!(
+            launch_origin(args.into_iter()).as_deref(),
+            Some(FIREFOX_ID.trim())
+        );
+        assert!(launch_origin([OsString::from("other.json")].into_iter()).is_none());
+    }
+
+    #[test]
+    fn browser_response_is_queued_only_after_all_bytes_are_received() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = crate::store::Settings {
+            working_folder: root.path().join("work"),
+            destination_folder: root.path().join("destination"),
+        };
+        fs::create_dir(&settings.working_folder).unwrap();
+        fs::create_dir(&settings.destination_folder).unwrap();
+        let store = Store::open(&root.path().join("queue.sqlite"), settings.clone()).unwrap();
+        let input = |bytes: &[u8]| {
+            let mut messages = Vec::new();
+            write_response(
+                &mut messages,
+                &json!({ "action": "chunk", "bytes": STANDARD.encode(bytes) }),
+            )
+            .unwrap();
+            write_response(&mut messages, &json!({ "action": "finish" })).unwrap();
+            messages
+        };
+        let url = "https://example.com/session.bin?private=token";
+        let mut output = Vec::new();
+        assert!(receive(&store, url, None, 5, input(b"cat").as_slice(), &mut output).is_err());
+        assert!(store.snapshot().unwrap().jobs.is_empty());
+        assert!(fs::read_dir(&settings.working_folder)
+            .unwrap()
+            .next()
+            .is_none());
+
+        receive(
+            &store,
+            url,
+            None,
+            5,
+            input(b"bytes").as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        let job = store.snapshot().unwrap().jobs.remove(0);
+        assert!(!job.url.contains("private"));
+        assert_eq!(job.bytes, 5);
+        assert!(store.process_next().unwrap());
+        assert_eq!(
+            fs::read(settings.destination_folder.join("session.bin")).unwrap(),
+            b"bytes"
+        );
     }
 }

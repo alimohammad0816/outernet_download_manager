@@ -89,13 +89,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Package the browser extension
-        working-directory: browser
-        run: zip -q -r ../outernet-browser-extension.zip .
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm run test:extension
+      - name: Package the browser extensions
+        run: |
+          node scripts/package-browser.mjs "$RUNNER_TEMP/outernet-extensions"
+          (cd "$RUNNER_TEMP/outernet-extensions/chromium" && zip -q -r "$GITHUB_WORKSPACE/outernet-browser-extension.zip" .)
+          (cd "$RUNNER_TEMP/outernet-extensions/firefox" && zip -q -r "$GITHUB_WORKSPACE/outernet-firefox-extension.zip" .)
       - uses: actions/upload-artifact@v7
         with:
           name: browser-extension
-          path: outernet-browser-extension.zip
+          path: |
+            outernet-browser-extension.zip
+            outernet-firefox-extension.zip
           if-no-files-found: error
 
   release:
@@ -118,4 +126,4 @@ jobs:
         run: |
           version="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
           test "$GITHUB_REF_NAME" = "v$version"
-          gh release create "$GITHUB_REF_NAME" installers/*.deb installers/*-setup.exe installers/outernet-browser-extension.zip --verify-tag --draft --generate-notes
+          gh release create "$GITHUB_REF_NAME" installers/*.deb installers/*-setup.exe installers/outernet-browser-extension.zip installers/outernet-firefox-extension.zip --verify-tag --draft --generate-notes

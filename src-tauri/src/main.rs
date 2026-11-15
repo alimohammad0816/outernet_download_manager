@@ -65,11 +65,16 @@ async fn connect_browser(browser: String) -> Result<(), String> {
     browser::register(&browser)
 }
 
+#[tauri::command]
+async fn schedule_queue(
+    store: State<'_, Arc<Store>>,
+    run_after: Option<u64>,
+) -> Result<(), String> {
+    store.schedule(run_after)
+}
+
 fn main() {
-    if let Some(origin) = std::env::args()
-        .nth(1)
-        .filter(|arg| arg.starts_with("chrome-extension://"))
-    {
+    if let Some(origin) = browser::launch_origin(std::env::args_os().skip(1)) {
         if let Err(error) = browser::run_host(&origin) {
             eprintln!("{error}");
         }
@@ -106,7 +111,8 @@ fn main() {
             add_download,
             retry_download,
             pause_download,
-            connect_browser
+            connect_browser,
+            schedule_queue
         ])
         .run(tauri::generate_context!())
         .expect("Outernet could not start");

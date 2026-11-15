@@ -86,6 +86,8 @@ impl Job {
 pub struct Snapshot {
     pub settings: Settings,
     pub jobs: Vec<Job>,
+    #[serde(default)]
+    pub run_after: Option<u64>,
 }
 
 pub struct Store {
@@ -111,6 +113,7 @@ impl Store {
         let initial = Snapshot {
             settings: defaults,
             jobs: Vec::new(),
+            run_after: None,
         };
         let json = serde_json::to_string(&initial).map_err(db_error)?;
         connection
@@ -226,28 +229,7 @@ impl Store {
         };
         self.update(|state| {
             let settings = state.settings.clone();
-            let is_taken = |name: &str| {
-                let destination = settings.destination_folder.join(name);
-                destination.exists()
-                    || state.jobs.iter().any(|job| {
-                        job.status != Status::Complete && job.destination() == destination
-                    })
-            };
-            if is_taken(&filename) {
-                if browser_source.is_none() {
-                    return Err("This destination filename is already in use.".into());
-                }
-                let (stem, extension) = filename
-                    .rsplit_once('.')
-                    .filter(|(stem, _)| !stem.is_empty())
-                    .map_or((filename.as_str(), String::new()), |(stem, extension)| {
-                        (stem, format!(".{extension}"))
-                    });
-                filename = (2..=10_000)
-                    .map(|index| format!("{stem} ({index}){extension}"))
-                    .find(|name| transfer::valid_name(name) && !is_taken(name))
-                    .ok_or("Choose a shorter or different filename in Outernet.")?;
-            }
+            filename = available_name(state, &settings, filename, browser_source.is_some())?;
             state.jobs.insert(
                 0,
                 Job {
@@ -263,6 +245,49 @@ impl Store {
                     error: None,
                     bytes: 0,
                     attempt: None,
+                },
+            );
+            Ok(())
+        })
+    }
+
+    pub fn schedule(&self, run_after: Option<u64>) -> Result<(), String> {
+        if run_after.is_some_and(|time| time <= unix_millis() || time > 8_640_000_000_000_000) {
+            return Err("Choose a future start time.".into());
+        }
+        let _worker = self.worker.lock().map_err(db_error)?;
+        self.update(|state| {
+            state.run_after = run_after;
+            Ok(())
+        })
+    }
+
+    pub fn complete_browser_transfer(
+        &self,
+        url: String,
+        filename: String,
+        settings: Settings,
+        attempt: String,
+        bytes: u64,
+        digest: String,
+    ) -> Result<(), String> {
+        self.update(|state| {
+            let filename = available_name(state, &settings, filename, true)?;
+            state.jobs.insert(
+                0,
+                Job {
+                    id: Uuid::new_v4().to_string(),
+                    url,
+                    filename,
+                    settings,
+                    format: Format::File,
+                    max_height: None,
+                    expected_sha256: None,
+                    sha256: Some(digest),
+                    status: Status::Ready,
+                    error: None,
+                    bytes,
+                    attempt: Some(attempt),
                 },
             );
             Ok(())
@@ -340,12 +365,12 @@ impl Store {
         if worker.is_some() {
             return Ok(false);
         }
-        let next = self
-            .snapshot()?
-            .jobs
-            .into_iter()
-            .rev()
-            .find(|job| matches!(job.status, Status::Queued | Status::Ready));
+        let snapshot = self.snapshot()?;
+        let queue_due = snapshot.run_after.is_none_or(|time| time <= unix_millis());
+        let next =
+            snapshot.jobs.into_iter().rev().find(|job| {
+                job.status == Status::Ready || (queue_due && job.status == Status::Queued)
+            });
         let Some(mut job) = next else {
             return Ok(false);
         };
@@ -463,6 +488,44 @@ impl Store {
             Ok(())
         })
     }
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn available_name(
+    state: &Snapshot,
+    settings: &Settings,
+    filename: String,
+    rename: bool,
+) -> Result<String, String> {
+    let is_taken = |name: &str| {
+        let destination = settings.destination_folder.join(name);
+        destination.exists()
+            || state
+                .jobs
+                .iter()
+                .any(|job| job.status != Status::Complete && job.destination() == destination)
+    };
+    if !is_taken(&filename) {
+        return Ok(filename);
+    }
+    if !rename {
+        return Err("This destination filename is already in use.".into());
+    }
+    let (stem, extension) = filename
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map_or((filename.as_str(), String::new()), |(stem, extension)| {
+            (stem, format!(".{extension}"))
+        });
+    (2..=10_000)
+        .map(|index| format!("{stem} ({index}){extension}"))
+        .find(|name| transfer::valid_name(name) && !is_taken(name))
+        .ok_or_else(|| "Choose a shorter or different filename in Outernet.".into())
 }
 
 fn save(connection: &Connection, snapshot: &Snapshot) -> Result<(), String> {

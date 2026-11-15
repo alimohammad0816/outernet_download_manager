@@ -1,4 +1,5 @@
 (() => {
+  const api = globalThis.browser ?? globalThis.chrome;
   const container = document.createElement("div");
   container.style.cssText = "all:initial;position:fixed;display:none;z-index:2147483647";
   const shadow = container.attachShadow({ mode: "closed" });
@@ -67,7 +68,7 @@
     button.disabled = true;
     button.textContent = "Sending…";
     try {
-      const result = await chrome.runtime.sendMessage({ action: "download", ...source });
+      const result = await api.runtime.sendMessage({ action: "download", ...source });
       button.textContent = result.ok ? "Added to Outernet" : "Open Outernet settings";
       button.title = result.error || "";
     } catch {
@@ -105,7 +106,7 @@
   window.setInterval(() => {
     position();
     if (++tick % 3 !== 1 || !document.querySelector("video")) return;
-    void chrome.runtime.sendMessage({ action: "streams" }).then(result => {
+    void api.runtime.sendMessage({ action: "streams" }).then(result => {
       streams = result?.streams ?? [];
       position();
     }).catch(() => {});

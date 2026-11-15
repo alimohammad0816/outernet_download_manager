@@ -9,3 +9,5 @@ button { width: 100%; text-align: left; padding: 7px; border: 1px solid #7778; b
 button:hover { background: #8882; }
 label { margin-right: 6px; }
 select { font: inherit; padding: 4px; margin-bottom: 8px; }
+
+.auto-setting { display: flex; align-items: flex-start; gap: 5px; margin: 4px 0 10px; }

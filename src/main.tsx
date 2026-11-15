@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, Check, CircleAlert, FolderOpen, Globe, HardDrive, List, Pause, Play, Plus, RefreshCw, Settings2, X } from "lucide-react";
+import { ArrowDownToLine, CalendarClock, Check, CircleAlert, FolderOpen, Globe, HardDrive, List, Pause, Play, Plus, RefreshCw, Settings2, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -17,9 +17,9 @@ type Job = {
   error: string | null;
   bytes: number;
 };
-type Snapshot = { settings: Settings; jobs: Job[] };
+type Snapshot = { settings: Settings; jobs: Job[]; run_after: number | null };
 type Filter = "all" | "complete" | "failed";
-type Panel = "add" | "settings" | "browser";
+type Panel = "add" | "settings" | "browser" | "schedule";
 
 const statusLabel: Record<Status, string> = {
   queued: "Queued",
@@ -193,15 +193,52 @@ function BrowserSettings({ onClose }: { onClose: () => void }) {
     <Modal title="Browser integration" onClose={onClose}>
       <div className="browser-help">
         <p>Load the Outernet browser extension, then connect your browser below.</p>
-        <p className="muted">In the browser’s Extensions page, enable Developer mode and choose Load unpacked. Select the extracted Outernet extension folder.</p>
+        <p className="muted">In Chrome, Edge or Chromium, use Load unpacked in Developer mode. In Firefox, load the Firefox package as a temporary add-on from about:debugging.</p>
         <div className="browser-actions">
-          {([["chrome", "Chrome"], ["edge", "Edge"], ["chromium", "Chromium"]] as const).map(([browser, label]) => (
+          {([["chrome", "Chrome"], ["edge", "Edge"], ["chromium", "Chromium"], ["firefox", "Firefox"]] as const).map(([browser, label]) => (
             <button key={browser} type="button" className="button secondary" disabled={busy} onClick={() => void connect(browser, label)}>{label}</button>
           ))}
         </div>
         {message && <p role="status">{message}</p>}
         {error && <p className="error" role="alert">{error}</p>}
       </div>
+    </Modal>
+  );
+}
+
+function toLocalTime(epoch: number) {
+  const time = new Date(epoch);
+  return new Date(epoch - time.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
+function ScheduleForm({ runAfter, onClose, onSave }: { runAfter: number | null; onClose: () => void; onSave: () => Promise<void> }) {
+  const [date, setDate] = useState(runAfter && runAfter > Date.now() ? toLocalTime(runAfter) : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save(epoch: number | null) {
+    setBusy(true);
+    setError("");
+    try {
+      if (epoch !== null && (!Number.isFinite(epoch) || epoch <= Date.now())) throw new Error("Choose a future start time.");
+      await invoke("schedule_queue", { runAfter: epoch });
+      await onSave();
+      onClose();
+    } catch (failure) {
+      setError(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Queue schedule" onClose={onClose}>
+      <form onSubmit={event => { event.preventDefault(); void save(new Date(date).getTime()); }}>
+        <p className="muted">Choose a local time for queued desktop transfers. Keep Outernet open for the queue to start at that time.</p>
+        <label>Start queue at<input type="datetime-local" data-initial-focus value={date} onChange={event => setDate(event.target.value)} required /></label>
+        <button type="button" className="button secondary" disabled={busy} onClick={() => void save(null)}>Run queue now</button>
+        <FormActions busy={busy} error={error} onClose={onClose} label="Schedule queue" />
+      </form>
     </Modal>
   );
 }
@@ -262,6 +299,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-tools">
+        <button className="nav-button" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /> Queue schedule</button>
         <button className="nav-button" onClick={() => setPanel("browser")}><Globe size={17} /> Browser integration</button>
         <button className="nav-button" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /> Settings</button>
         </div>
@@ -273,6 +311,11 @@ function App() {
         </header>
         {loadError && <p className="error banner" role="alert">{loadError}</p>}
         {actionError && <p className="error banner" role="alert">{actionError}</p>}
+        {state?.run_after && state.run_after > Date.now() && (
+          <button className="button secondary schedule-notice" onClick={() => setPanel("schedule")}>
+            <CalendarClock size={16} /> Queue starts at {new Date(state.run_after).toLocaleString()}
+          </button>
+        )}
         <section className="download-list" aria-label={heading}>
           <table>
             <thead><tr><th>File</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>
@@ -309,6 +352,7 @@ function App() {
         </section>
         {state && <footer><HardDrive size={15} /><button title={state.settings.workingFolder} onClick={() => setPanel("settings")}>In progress · {state.settings.workingFolder}</button></footer>}
       </main>
+      {panel === "schedule" && state && <ScheduleForm runAfter={state.run_after} onClose={closePanel} onSave={refresh} />}
       {panel === "browser" && <BrowserSettings onClose={closePanel} />}
       {panel === "add" && <AddDownload onClose={closePanel} onSave={refresh} />}
       {panel === "settings" && state && <SettingsForm settings={state.settings} onClose={closePanel} onSave={refresh} />}

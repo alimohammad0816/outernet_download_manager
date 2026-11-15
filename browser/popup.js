@@ -1,18 +1,26 @@
+const api = globalThis.browser ?? globalThis.chrome;
 const status = document.querySelector("#status");
 const list = document.querySelector("#streams");
 const quality = document.querySelector("#quality");
-const { maxHeight } = await chrome.storage.local.get("maxHeight");
+const automatic = document.querySelector("#automatic");
+const { maxHeight, automaticHandoff } = await api.storage.local.get(["maxHeight", "automaticHandoff"]);
+automatic.checked = Boolean(automaticHandoff);
+automatic.addEventListener("change", () => {
+  void api.storage.local.set({ automaticHandoff: automatic.checked });
+});
 quality.value = String(maxHeight || 0);
 quality.addEventListener("change", () => {
-  void chrome.storage.local.set({ maxHeight: Number(quality.value) });
+  void api.storage.local.set({ maxHeight: Number(quality.value) });
 });
 try {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await api.tabs.query({ active: true, currentWindow: true });
   const [connection, data] = await Promise.all([
-    chrome.runtime.sendMessage({ action: "ping" }),
-    chrome.runtime.sendMessage({ action: "streams", tabId: tab.id }),
+    api.runtime.sendMessage({ action: "ping" }),
+    api.runtime.sendMessage({ action: "streams", tabId: tab.id }),
   ]);
-  status.textContent = connection.ok ? (data?.result?.error || "Desktop app connected") : connection.error;
+  status.textContent = connection.ok
+    ? (data?.result?.pending ? "Receiving through your browser…" : data?.result?.error || "Desktop app connected")
+    : connection.error;
   for (const stream of data?.streams ?? []) {
     const row = document.createElement("li");
     const button = document.createElement("button");
@@ -21,7 +29,7 @@ try {
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
-        const result = await chrome.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream });
+        const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream });
         status.textContent = result.ok ? "Added to Outernet" : result.error;
       } catch {
         status.textContent = "Could not send this download.";

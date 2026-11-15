@@ -192,6 +192,55 @@ fn refuses_truncated_response_and_wrong_hash() {
 }
 
 #[test]
+fn schedule_survives_a_restart_and_holds_queued_transfers() {
+    let (_root, _destination, database, settings, store) = setup(None);
+    let start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let (url, server) = serve(Response::Complete(32, 12));
+    store
+        .add(url, "scheduled.bin".into(), expected(32, 12))
+        .unwrap();
+    store.schedule(Some(start)).unwrap();
+    assert!(!store.process_next().unwrap());
+    drop(store);
+
+    let store = Store::open(&database, settings.clone()).unwrap();
+    store.recover().unwrap();
+    assert_eq!(store.snapshot().unwrap().run_after, Some(start));
+    assert!(!store.process_next().unwrap());
+    // A completed browser transfer can be published while new desktop transfers are waiting.
+    let staged = settings.working_folder.join(".outernet-browser-fixture");
+    fs::create_dir(&staged).unwrap();
+    fs::write(staged.join("payload"), [17; 8]).unwrap();
+    store
+        .complete_browser_transfer(
+            "https://example.com/received.bin".into(),
+            "received.bin".into(),
+            settings.clone(),
+            "browser-fixture".into(),
+            8,
+            expected(8, 17),
+        )
+        .unwrap();
+    assert!(store.process_next().unwrap());
+    assert_eq!(
+        fs::read(settings.destination_folder.join("received.bin")).unwrap(),
+        [17; 8]
+    );
+    assert!(!store.process_next().unwrap());
+    store.schedule(None).unwrap();
+    assert!(store.process_next().unwrap());
+    server.join().unwrap().unwrap();
+    assert_eq!(
+        fs::read(settings.destination_folder.join("scheduled.bin")).unwrap(),
+        [12; 32]
+    );
+}
+
+#[test]
 fn verifies_chunked_and_connection_delimited_responses() {
     let hash = format!("{:x}", Sha256::digest(b"example"));
     for (response, reference, complete) in [

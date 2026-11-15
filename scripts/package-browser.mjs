@@ -1,0 +1,25 @@
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const sources = fileURLToPath(new URL("../browser/", import.meta.url));
+const target = process.argv[2];
+if (!target) throw new Error("Provide a destination for the two browser packages.");
+const manifest = JSON.parse(await readFile(join(sources, "manifest.json"), "utf8"));
+const firefoxId = (await readFile(new URL("../src-tauri/firefox-extension-id", import.meta.url), "utf8")).trim();
+const files = ["background.js", "handoff.js", "popup.js", "popup.html", "popup.css", "video.js", "icon.png"];
+
+for (const browser of ["chromium", "firefox"]) {
+  const directory = join(target, browser);
+  await mkdir(directory, { recursive: true });
+  await Promise.all(files.map(filename => cp(join(sources, filename), join(directory, filename))));
+  const config = structuredClone(manifest);
+  if (browser === "firefox") {
+    delete config.key;
+    config.background = { scripts: ["background.js"], type: "module" };
+    config.browser_specific_settings = {
+      gecko: { id: firefoxId, strict_min_version: "140.0", data_collection_permissions: { required: ["none"] } },
+    };
+  }
+  await writeFile(join(directory, "manifest.json"), JSON.stringify(config, null, 2) + "\n");
+}
