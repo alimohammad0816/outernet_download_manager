@@ -1,10 +1,10 @@
+use crate::progress::TransferControl;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ExitStatus},
-    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::Duration,
 };
@@ -55,10 +55,10 @@ pub fn download(
     url: &str,
     directory: &Path,
     has_expected_hash: bool,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<(), String> {
     use reqwest::{header, StatusCode, Version};
-    check_paused(paused)?;
+    control.check()?;
     fs::create_dir(directory)
         .map_err(|error| format!("Cannot create the working folder: {error}"))?;
     let client = http_client(true)?;
@@ -91,24 +91,27 @@ pub fn download(
     {
         return Err("The server did not provide a verifiable response length or framing. A publisher SHA-256 is required for this link.".into());
     }
+    control.set_total(length);
     let mut file = File::options()
         .create_new(true)
         .write(true)
         .open(directory.join("payload"))
         .map_err(|error| format!("Cannot open the temporary file: {error}"))?;
     let mut written = 0_u64;
-    let mut buffer = [0; 128 * 1024];
+    let mut buffer = vec![0; control.chunk_bytes(128 * 1024)];
     loop {
-        check_paused(paused)?;
+        control.check()?;
         let read = response
             .read(&mut buffer)
             .map_err(|_| "The file transfer ended before the response was complete.")?;
         if read == 0 {
             break;
         }
+        control.account_network(read)?;
         file.write_all(&buffer[..read])
             .map_err(|error| format!("Cannot write the temporary file: {error}"))?;
         written += read as u64;
+        control.commit_bytes(read as u64);
     }
     if length.is_some_and(|length| length != written) {
         return Err("The downloaded size differs from the server’s reported length.".into());
@@ -214,20 +217,12 @@ pub fn reset_working_directory(directory: &Path) -> Result<(), String> {
     }
 }
 
-pub fn check_paused(paused: &AtomicBool) -> Result<(), String> {
-    if paused.load(Ordering::Relaxed) {
-        Err("Download paused.".into())
-    } else {
-        Ok(())
-    }
-}
-
-pub fn wait_for_child(child: &mut Child, paused: &AtomicBool) -> io::Result<ExitStatus> {
+pub fn wait_for_child(child: &mut Child, control: &TransferControl) -> io::Result<ExitStatus> {
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
-        if paused.load(Ordering::Relaxed) {
+        if control.is_paused() {
             let _ = child.kill();
             return child.wait();
         }

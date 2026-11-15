@@ -40,7 +40,8 @@ function browserFixture({ failChunk = false } = {}) {
               events.push(message.action);
               if (message.action === "chunk") chunks.push(Buffer.from(message.bytes, "base64"));
               queueMicrotask(() => onMessage.emit(
-                failChunk && message.action === "chunk" ? { ok: false, error: "Disk full" } : { ok: true },
+                failChunk && message.action === "chunk" ? { ok: false, error: "Disk full" }
+                  : message.action === "receive" ? { ok: true, chunk_bytes: 8192 } : { ok: true },
               ));
             },
             disconnect() { onDisconnect.emit(); },
@@ -94,6 +95,7 @@ test("automatic transfer preserves the original until the native host stores the
   assert.deepEqual(fixture.events.slice(0, 3), ["receive", "pause", "chunk"]);
   assert.deepEqual(fixture.events.slice(-2), ["finish", "cancel"]);
   assert.deepEqual(Buffer.concat(fixture.chunks), Buffer.alloc(LENGTH, 37));
+  assert.ok(fixture.chunks.every(chunk => chunk.length <= 8192));
 });
 
 test("automatic transfer resumes the browser download after a failed write", async context => {

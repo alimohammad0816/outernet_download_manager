@@ -1,5 +1,7 @@
 #[path = "../src/media.rs"]
 mod media;
+#[path = "../src/progress.rs"]
+mod progress;
 #[path = "../src/ranges.rs"]
 mod ranges;
 #[path = "../src/store.rs"]
@@ -131,6 +133,7 @@ fn setup(destination_root: Option<&Path>) -> (TempDir, TempDir, PathBuf, Setting
     let settings = Settings {
         working_folder: work,
         destination_folder: destination.path().to_owned(),
+        speed_limit_kib: None,
     };
     let store = Store::open(&database, settings.clone()).unwrap();
     (root, destination, database, settings, store)
@@ -152,6 +155,7 @@ fn downloads_exact_bytes_after_reopening_the_queue() {
         .settings(Settings {
             working_folder: new_work.clone(),
             destination_folder: new_work.clone(),
+            speed_limit_kib: None,
         })
         .unwrap();
     drop(store);
@@ -529,6 +533,56 @@ fn reuses_only_verified_ranges_after_restart() {
     assert!(get.iter().any(|request| request
         .to_ascii_lowercase()
         .contains(&format!("range: bytes={PART}-"))));
+}
+
+#[test]
+fn parallel_ranges_share_the_speed_limit_and_report_live_progress() {
+    let (_root, _destination, database, mut settings, store) = setup(None);
+    let fixture = range_fixture(std::sync::Arc::new(std::sync::Mutex::new(RangeState {
+        mode: Scenario::Stable,
+        requests: Vec::new(),
+    })));
+    let url = fixture.url("limited.bin");
+    let digest = expected(RANGE_LENGTH, 29);
+    store
+        .add(url, "limited.bin".into(), digest.clone())
+        .unwrap();
+    settings.speed_limit_kib = Some(8 * 1024);
+    store.settings(settings.clone()).unwrap();
+    drop(store);
+    let store = Store::open(&database, settings.clone()).unwrap();
+    assert_eq!(
+        store.snapshot().unwrap().settings.speed_limit_kib,
+        Some(8 * 1024)
+    );
+
+    let start = std::time::Instant::now();
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| store.process_next().unwrap());
+        let mut observed = false;
+        while !worker.is_finished() {
+            if let Some(transfer) = job(&store).transfer {
+                observed |= transfer.total_bytes == Some(RANGE_LENGTH)
+                    && transfer.completed_bytes > 0
+                    && transfer.completed_bytes < RANGE_LENGTH
+                    && transfer.bytes_per_second > 0;
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
+        assert!(worker.join().unwrap());
+        assert!(observed, "expected live size, progress and measured speed");
+    });
+    assert!(start.elapsed() >= Duration::from_millis(1450));
+    assert!(
+        job(&store).status == Status::Complete,
+        "{:?}",
+        job(&store).error
+    );
+    assert!(job(&store).transfer.is_none());
+    assert_eq!(
+        transfer::sha256(&settings.destination_folder.join("limited.bin")).unwrap(),
+        digest
+    );
 }
 
 #[test]

@@ -1,7 +1,8 @@
 use super::{copy_segment, disk_error, iso_duration, quality_rank, source_url, MAX_SEGMENTS};
+use crate::progress::TransferControl;
 use reqwest::blocking::Client;
 use roxmltree::Node;
-use std::{fs::File, path::Path, process::Command, sync::atomic::AtomicBool};
+use std::{fs::File, path::Path, process::Command};
 use url::Url;
 
 type Xml<'a, 'input> = Node<'a, 'input>;
@@ -13,7 +14,7 @@ pub fn prepare(
     manifest: &str,
     ffmpeg: &mut Command,
     max_height: Option<u32>,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<f64, String> {
     let xml = roxmltree::Document::parse(manifest)
         .map_err(|_| "The URL did not return a valid DASH manifest.")?;
@@ -99,7 +100,7 @@ pub fn prepare(
         [root, period, set, representation],
         duration,
         &video,
-        paused,
+        control,
     )?;
     ffmpeg
         .args(["-protocol_whitelist", "file", "-f", "mov", "-i"])
@@ -112,7 +113,7 @@ pub fn prepare(
             [root, period, set, representation],
             duration,
             &audio,
-            paused,
+            control,
         )?;
         ffmpeg
             .args(["-protocol_whitelist", "file", "-f", "mov", "-i"])
@@ -128,7 +129,7 @@ fn stage_track<'a, 'input>(
     nodes: [Xml<'a, 'input>; 4],
     duration: f64,
     destination: &Path,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<(), String> {
     let mut base = base.clone();
     for node in nodes {
@@ -183,14 +184,14 @@ fn stage_track<'a, 'input>(
         client,
         &source_url(&base, &initial_name)?,
         &mut output,
-        paused,
+        control,
     )?;
     for (index, time) in timestamps.into_iter().enumerate() {
         let number = first_number
             .checked_add(index as u64)
             .ok_or("DASH segment numbering overflow.")?;
         let name = substitute(segment, id, bandwidth, number, time)?;
-        copy_segment(client, &source_url(&base, &name)?, &mut output, paused)?;
+        copy_segment(client, &source_url(&base, &name)?, &mut output, control)?;
     }
     Ok(())
 }

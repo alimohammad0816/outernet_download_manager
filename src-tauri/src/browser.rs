@@ -1,4 +1,4 @@
-use crate::{media::Format, open_store, store::Store, transfer, APP_ID};
+use crate::{media::Format, open_store, progress::TransferControl, store::Store, transfer, APP_ID};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
@@ -125,6 +125,8 @@ fn receive(
         return Err("This response length is outside the supported range.".into());
     }
     let settings = store.snapshot()?.settings;
+    let control = TransferControl::new(settings.speed_limit_kib);
+    let chunk_bytes = control.chunk_bytes(32 * 1024);
     let temporary = tempfile::Builder::new()
         .prefix(".outernet-")
         .tempdir_in(&settings.working_folder)
@@ -137,7 +139,11 @@ fn receive(
         .ok_or("Cannot identify the working folder.")?
         .to_string();
     let mut payload = File::create(temporary.path().join("payload")).map_err(receive_error)?;
-    write_response(&mut output, &json!({ "ok": true })).map_err(receive_error)?;
+    write_response(
+        &mut output,
+        &json!({ "ok": true, "chunk_bytes": chunk_bytes }),
+    )
+    .map_err(receive_error)?;
     let mut written = 0;
     let mut hash = Sha256::new();
     loop {
@@ -146,12 +152,19 @@ fn receive(
                 let bytes = STANDARD
                     .decode(bytes)
                     .map_err(|_| "Invalid browser data chunk.")?;
+                if bytes.len() > chunk_bytes && bytes.len() <= 32 * 1024 {
+                    return Err(
+                        "Update the Outernet browser extension to use the configured speed limit."
+                            .into(),
+                    );
+                }
                 if bytes.is_empty()
-                    || bytes.len() > 32 * 1024
+                    || bytes.len() > chunk_bytes
                     || bytes.len() as u64 > length - written
                 {
                     return Err("The browser sent more bytes than expected.".into());
                 }
+                control.account_network(bytes.len())?;
                 payload.write_all(&bytes).map_err(receive_error)?;
                 hash.update(&bytes);
                 written += bytes.len() as u64;
@@ -362,6 +375,7 @@ mod tests {
         let settings = crate::store::Settings {
             working_folder: root.path().join("work"),
             destination_folder: root.path().join("destination"),
+            speed_limit_kib: None,
         };
         fs::create_dir(&settings.working_folder).unwrap();
         fs::create_dir(&settings.destination_folder).unwrap();

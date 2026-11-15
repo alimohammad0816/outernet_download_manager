@@ -1,7 +1,7 @@
 #[path = "media/dash.rs"]
 mod dash;
 
-use crate::transfer;
+use crate::{progress::TransferControl, transfer};
 use reqwest::{
     blocking::{Client, Response},
     header, StatusCode,
@@ -13,7 +13,6 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::AtomicBool,
 };
 use url::Url;
 
@@ -47,9 +46,9 @@ pub fn download(
     directory: &Path,
     format: Format,
     max_height: Option<u32>,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<(), String> {
-    transfer::check_paused(paused)?;
+    control.check()?;
     fs::create_dir(directory).map_err(disk_error)?;
     let client = transfer::http_client(true)?;
     let url = transfer::parse_url(url)?;
@@ -72,7 +71,7 @@ pub fn download(
             manifest,
             &mut ffmpeg,
             max_height,
-            paused,
+            control,
         )?,
         Format::Dash => dash::prepare(
             &client,
@@ -81,14 +80,14 @@ pub fn download(
             &manifest,
             &mut ffmpeg,
             max_height,
-            paused,
+            control,
         )?,
         Format::File => return Err("Select a video stream format.".into()),
     };
     ffmpeg
         .args(["-sn", "-dn", "-c", "copy", "-f", "matroska", "-n"])
         .arg(directory.join("payload"));
-    run_mux(&mut ffmpeg, paused)?;
+    run_mux(&mut ffmpeg, control)?;
     let result = directory.join("payload");
     verify_output(&result, duration)?;
     let mut decode = media_command("ffmpeg");
@@ -119,7 +118,7 @@ pub fn download(
             "null",
             "-",
         ]);
-    run_mux(&mut decode, paused)
+    run_mux(&mut decode, control)
 }
 
 fn open_http(client: &Client, url: &Url) -> Result<Response, String> {
@@ -283,7 +282,7 @@ fn prepare_hls(
     manifest: String,
     ffmpeg: &mut Command,
     max_height: Option<u32>,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<f64, String> {
     let lines = hls_lines(&manifest)?;
     let selected = select_hls(&base, &lines, max_height)?;
@@ -297,7 +296,7 @@ fn prepare_hls(
         "video",
         &video_base,
         &video_manifest,
-        paused,
+        control,
     )?;
     hls_input(ffmpeg, &video);
     if let Some(audio) = selected.audio {
@@ -308,7 +307,7 @@ fn prepare_hls(
             "audio",
             &audio_base,
             &audio_manifest,
-            paused,
+            control,
         )?;
         if !close_duration(duration, audio_duration) {
             return Err("The HLS video and audio playlists have different durations.".into());
@@ -325,7 +324,7 @@ fn stage_hls(
     prefix: &str,
     base: &Url,
     manifest: &str,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<(PathBuf, f64), String> {
     let lines = hls_lines(manifest)?;
     if !lines.contains(&"#EXT-X-ENDLIST") {
@@ -373,7 +372,7 @@ fn stage_hls(
                     .ok_or("An HLS initialization segment is missing its URL.")?,
             )?;
             let name = format!("{prefix}-init-{count}.mp4");
-            fetch_segment(client, &url, &directory.join(&name), paused)?;
+            fetch_segment(client, &url, &directory.join(&name), control)?;
             playlist.push_str(&format!("#EXT-X-MAP:URI=\"{name}\"\n"));
             mapped = true;
         } else if line == "#EXT-X-DISCONTINUITY" {
@@ -394,7 +393,7 @@ fn stage_hls(
                 _ => "ts",
             };
             let name = format!("{prefix}-{count}.{extension}");
-            fetch_segment(client, &url, &directory.join(&name), paused)?;
+            fetch_segment(client, &url, &directory.join(&name), control)?;
             playlist.push_str(&format!("#EXTINF:{seconds},\n{name}\n"));
             duration += seconds;
             target = target.max(seconds.ceil());
@@ -416,23 +415,23 @@ fn fetch_segment(
     client: &Client,
     url: &Url,
     destination: &Path,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<(), String> {
     let mut file = File::options()
         .create_new(true)
         .write(true)
         .open(destination)
         .map_err(disk_error)?;
-    copy_segment(client, url, &mut file, paused)
+    copy_segment(client, url, &mut file, control)
 }
 
 fn copy_segment(
     client: &Client,
     url: &Url,
     file: &mut File,
-    paused: &AtomicBool,
+    control: &TransferControl,
 ) -> Result<(), String> {
-    transfer::check_paused(paused)?;
+    control.check()?;
     let mut response = open_http(client, url)?;
     let expected = response
         .headers()
@@ -440,16 +439,18 @@ fn copy_segment(
         .and_then(|value| value.to_str().ok())
         .and_then(|length| length.parse::<u64>().ok());
     let mut bytes = 0;
-    let mut block = [0; 64 * 1024];
+    let mut block = vec![0; control.chunk_bytes(64 * 1024)];
     loop {
-        transfer::check_paused(paused)?;
+        control.check()?;
         let length = response
             .read(&mut block)
             .map_err(|_| "The video segment transfer was interrupted.")?;
         if length == 0 {
             break;
         }
+        control.account_network(length)?;
         file.write_all(&block[..length]).map_err(disk_error)?;
+        control.commit_bytes(length as u64);
         bytes += length as u64;
     }
     if bytes == 0 || expected.is_some_and(|length| length != bytes) {
@@ -502,14 +503,14 @@ fn media_command(program: &str) -> Command {
     command
 }
 
-fn run_mux(ffmpeg: &mut Command, paused: &AtomicBool) -> Result<(), String> {
+fn run_mux(ffmpeg: &mut Command, control: &TransferControl) -> Result<(), String> {
     let mut child = ffmpeg.spawn().map_err(|error| {
         format!("Cannot start FFmpeg. Install ffmpeg and add it to PATH. ({error})")
     })?;
     let mut diagnostics = child.stderr.take().expect("piped stderr");
     let (status, warnings) = std::thread::scope(|scope| {
         let warnings = scope.spawn(|| io::copy(&mut diagnostics, &mut io::sink()));
-        let status = transfer::wait_for_child(&mut child, paused);
+        let status = transfer::wait_for_child(&mut child, control);
         if status.is_err() {
             let _ = child.kill();
             let _ = child.wait();

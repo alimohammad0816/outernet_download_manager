@@ -41,7 +41,7 @@ function nativeSession(api, host) {
   port.onMessage.addListener(response => {
     if (!pending) return;
     const { settle } = pending;
-    settle(response?.ok ? null : new Error(response?.error || "Outernet rejected the browser transfer."));
+    settle(response?.ok ? null : new Error(response?.error || "Outernet rejected the browser transfer."), response);
   });
   port.onDisconnect.addListener(() => {
     closed = true;
@@ -54,11 +54,11 @@ function nativeSession(api, host) {
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => pending?.settle(new Error("Outernet did not acknowledge the transfer.")), ACK_TIMEOUT);
         pending = {
-          settle(error) {
+          settle(error, response) {
             clearTimeout(timeout);
             pending = undefined;
             if (error) reject(error);
-            else resolve();
+            else resolve(response);
           },
         };
         try { port.postMessage(message); } catch (error) { pending.settle(error); }
@@ -119,15 +119,17 @@ export async function receiveWithBrowser(api, host, url, { filename, expected, o
       throw new Error("The site returned an HTML page instead of download data.");
     }
     native = nativeSession(api, host);
-    await native.request({
+    const ready = await native.request({
       action: "receive", url: response.url || source.href,
       filename: filename || attachmentName(response.headers.get("content-disposition")),
       length,
     });
+    const packetSize = Number.isInteger(ready.chunk_bytes) && ready.chunk_bytes > 0
+      ? Math.min(ready.chunk_bytes, CHUNK_SIZE) : CHUNK_SIZE;
     if (onReady) await onReady();
     async function sendBytes(bytes) {
-      for (let offset = 0; offset < bytes.length; offset += CHUNK_SIZE) {
-        const slice = bytes.subarray(offset, offset + CHUNK_SIZE);
+      for (let offset = 0; offset < bytes.length; offset += packetSize) {
+        const slice = bytes.subarray(offset, offset + packetSize);
         await native.request({ action: "chunk", bytes: btoa(String.fromCharCode(...slice)) });
       }
     }

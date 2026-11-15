@@ -1,5 +1,6 @@
 use crate::{
     media::{self, Format},
+    progress::{TransferControl, TransferProgress, MAX_SPEED_KIB},
     ranges, transfer,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -7,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 use uuid::Uuid;
 
@@ -19,6 +17,8 @@ use uuid::Uuid;
 pub struct Settings {
     pub working_folder: PathBuf,
     pub destination_folder: PathBuf,
+    #[serde(default)]
+    pub speed_limit_kib: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -50,6 +50,8 @@ pub struct Job {
     pub status: Status,
     pub error: Option<String>,
     pub bytes: u64,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<TransferProgress>,
     attempt: Option<String>,
 }
 
@@ -97,7 +99,7 @@ pub struct Store {
 
 struct ActiveDownload {
     id: String,
-    paused: Arc<AtomicBool>,
+    control: Arc<TransferControl>,
 }
 
 impl Store {
@@ -143,7 +145,22 @@ impl Store {
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         let mut state = self.read()?.ok_or("Missing application state.")?;
-        state.jobs = state.jobs.into_iter().map(Job::progress).collect();
+        let worker = self.worker.lock().map_err(db_error)?;
+        state.jobs = state
+            .jobs
+            .into_iter()
+            .map(|mut job| {
+                if matches!(job.status, Status::Downloading | Status::Pausing) {
+                    if let Some(active) = worker.as_ref().filter(|active| active.id == job.id) {
+                        let progress = active.control.progress();
+                        job.bytes = progress.completed_bytes;
+                        job.transfer = Some(progress);
+                        return job;
+                    }
+                }
+                job.progress()
+            })
+            .collect();
         Ok(state)
     }
 
@@ -168,12 +185,21 @@ impl Store {
     }
 
     pub fn settings(&self, settings: Settings) -> Result<(), String> {
+        if settings
+            .speed_limit_kib
+            .is_some_and(|rate| !(1..=MAX_SPEED_KIB).contains(&rate))
+        {
+            return Err(
+                "Enter a speed limit between 1 and 1048576 KiB/s, or leave it blank.".into(),
+            );
+        }
         let working_folder = transfer::normalize_folder(settings.working_folder)?;
         let destination_folder = transfer::normalize_folder(settings.destination_folder)?;
         self.update(|state| {
             state.settings = Settings {
                 working_folder,
                 destination_folder,
+                speed_limit_kib: settings.speed_limit_kib,
             };
             Ok(())
         })
@@ -244,6 +270,7 @@ impl Store {
                     status: Status::Queued,
                     error: None,
                     bytes: 0,
+                    transfer: None,
                     attempt: None,
                 },
             );
@@ -287,6 +314,7 @@ impl Store {
                     status: Status::Ready,
                     error: None,
                     bytes,
+                    transfer: None,
                     attempt: Some(attempt),
                 },
             );
@@ -310,7 +338,7 @@ impl Store {
             Ok(())
         })?;
         if let Some(job) = active.as_ref().filter(|job| job.id == id) {
-            job.paused.store(true, Ordering::Relaxed);
+            job.control.pause();
         }
         Ok(())
     }
@@ -365,7 +393,7 @@ impl Store {
         if worker.is_some() {
             return Ok(false);
         }
-        let snapshot = self.snapshot()?;
+        let snapshot = self.read()?.ok_or("Missing application state.")?;
         let queue_due = snapshot.run_after.is_none_or(|time| time <= unix_millis());
         let next =
             snapshot.jobs.into_iter().rev().find(|job| {
@@ -374,7 +402,7 @@ impl Store {
         let Some(mut job) = next else {
             return Ok(false);
         };
-        let paused = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(TransferControl::new(snapshot.settings.speed_limit_kib));
         let pending_transfer = job.status == Status::Queued;
         if pending_transfer {
             job.status = Status::Downloading;
@@ -384,12 +412,12 @@ impl Store {
         }
         *worker = Some(ActiveDownload {
             id: job.id.clone(),
-            paused: Arc::clone(&paused),
+            control: Arc::clone(&control),
         });
         drop(worker);
 
         let outcome = if pending_transfer {
-            self.transfer(&mut job, &paused)
+            self.transfer(&mut job, &control)
                 .and_then(|()| self.publish(&mut job))
         } else {
             self.publish(&mut job)
@@ -397,7 +425,7 @@ impl Store {
         let mut worker = self.worker.lock().map_err(db_error)?;
         *worker = None;
         if let Err(error) = outcome {
-            job.status = if paused.load(Ordering::Relaxed) {
+            job.status = if control.is_paused() {
                 Status::Paused
             } else {
                 Status::Failed
@@ -411,24 +439,24 @@ impl Store {
         Ok(true)
     }
 
-    fn transfer(&self, job: &mut Job, paused: &AtomicBool) -> Result<(), String> {
+    fn transfer(&self, job: &mut Job, control: &TransferControl) -> Result<(), String> {
         let directory = job.working_dir();
         if !ranges::has_checkpoint(&directory) {
             transfer::reset_working_directory(&directory)?;
         }
         match job.format {
             Format::File => {
-                if !ranges::try_download(&job.url, &directory, paused)? {
+                if !ranges::try_download(&job.url, &directory, control)? {
                     transfer::reset_working_directory(&directory)?;
                     transfer::download(
                         &job.url,
                         &directory,
                         job.expected_sha256.is_some(),
-                        paused,
+                        control,
                     )?;
                 }
             }
-            format => media::download(&job.url, &directory, format, job.max_height, paused)?,
+            format => media::download(&job.url, &directory, format, job.max_height, control)?,
         }
         let file = File::options()
             .read(true)
@@ -440,7 +468,7 @@ impl Store {
         drop(file);
         {
             let _worker = self.worker.lock().map_err(db_error)?;
-            transfer::check_paused(paused)?;
+            control.check()?;
             job.status = Status::Verifying;
             self.save_job(job)?;
         }

@@ -2,6 +2,7 @@
 
 mod browser;
 mod media;
+mod progress;
 mod ranges;
 mod store;
 mod transfer;
@@ -55,6 +56,7 @@ fn open_store(data: &Path) -> Result<Store, io::Error> {
         Settings {
             working_folder,
             destination_folder,
+            speed_limit_kib: None,
         },
     )
     .map_err(io::Error::other)

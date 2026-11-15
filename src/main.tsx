@@ -5,7 +5,8 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-type Settings = { workingFolder: string; destinationFolder: string };
+type Settings = { workingFolder: string; destinationFolder: string; speedLimitKib: number | null };
+type TransferProgress = { totalBytes: number | null; completedBytes: number; bytesPerSecond: number };
 type Status = "queued" | "downloading" | "pausing" | "paused" | "verifying" | "ready" | "complete" | "failed";
 type Job = {
   id: string;
@@ -16,6 +17,7 @@ type Job = {
   sha256: string | null;
   error: string | null;
   bytes: number;
+  transfer?: TransferProgress;
 };
 type Snapshot = { settings: Settings; jobs: Job[]; run_after: number | null };
 type Filter = "all" | "complete" | "failed";
@@ -43,10 +45,37 @@ function describe(error: unknown) {
 }
 
 function displaySize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
   const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length);
   return `${(bytes / 1024 ** unit).toFixed(1)} ${units[unit - 1]}`;
+}
+
+function remainingTime(seconds: number) {
+  const rounded = Math.ceil(seconds);
+  if (rounded < 60) return `${rounded}s`;
+  if (rounded < 3600) return `${Math.floor(rounded / 60)}m ${rounded % 60}s`;
+  const hours = Math.floor(rounded / 3600);
+  if (hours < 24) return `${hours}h ${Math.floor((rounded % 3600) / 60)}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function DownloadProgress({ transfer }: { transfer: TransferProgress }) {
+  const { totalBytes, completedBytes, bytesPerSecond } = transfer;
+  const known = totalBytes !== null && totalBytes > 0;
+  const remaining = known ? Math.max(0, totalBytes - completedBytes) : 0;
+  const percent = known ? Math.min(100, Math.floor(completedBytes / totalBytes * 100)) : null;
+  const estimates = [
+    percent !== null ? `${percent}%` : null,
+    bytesPerSecond > 0 ? `${displaySize(bytesPerSecond)}/s` : null,
+    remaining > 0 && bytesPerSecond > 0 ? `${remainingTime(remaining / bytesPerSecond)} left` : null,
+  ].filter(Boolean);
+  return (
+    <div className="download-progress">
+      {known && <progress aria-label="Download progress" value={completedBytes} max={totalBytes} />}
+      {estimates.length > 0 && <small>{estimates.join(" · ")}</small>}
+    </div>
+  );
 }
 
 function suggestedName(input: string) {
@@ -124,10 +153,11 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
 
 function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClose: () => void; onSave: () => Promise<void> }) {
   const [paths, setPaths] = useState(settings);
+  const [limit, setLimit] = useState(settings.speedLimitKib?.toString() ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function choose(key: keyof Settings) {
+  async function choose(key: "workingFolder" | "destinationFolder") {
     try {
       const folder = await open({ directory: true, defaultPath: paths[key] || undefined });
       if (folder) setPaths(previous => ({ ...previous, [key]: folder }));
@@ -141,7 +171,7 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
     setBusy(true);
     setError("");
     try {
-      await invoke("save_settings", { settings: paths });
+      await invoke("save_settings", { settings: { ...paths, speedLimitKib: limit ? Number(limit) : null } });
       await onSave();
       onClose();
     } catch (failure) {
@@ -152,7 +182,7 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
   }
 
   return (
-    <Modal title="Storage settings" onClose={onClose}>
+    <Modal title="Download settings" onClose={onClose}>
       <form onSubmit={submit}>
         <p className="muted">Folder changes apply to newly added downloads.</p>
         {([["workingFolder", "In-progress folder"], ["destinationFolder", "Completed downloads folder"]] as const).map(([key, label]) => (
@@ -164,6 +194,12 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
             </div>
           </div>
         ))}
+        <div className="field">
+          <label htmlFor="speed-limit">Speed limit per download <span>(KiB/s)</span></label>
+          <input id="speed-limit" type="number" min="1" max="1048576" step="1" inputMode="numeric"
+            placeholder="Unlimited" value={limit} onChange={event => setLimit(event.target.value)} aria-describedby="speed-limit-help" />
+          <small id="speed-limit-help">Applies when a transfer starts. Leave blank for unlimited speed.</small>
+        </div>
         <FormActions busy={busy} error={error} onClose={onClose} label="Save settings" />
       </form>
     </Modal>
@@ -322,10 +358,18 @@ function App() {
             <tbody>
               {visible.map(job => (
                 <tr key={job.id}>
-                  <td><strong className="filename" title={job.filename}>{job.filename}</strong><small>{hostname(job.url)}</small>{job.error && <small className="error">{job.error}</small>}</td>
+                  <td>
+                    <strong className="filename" title={job.filename}>{job.filename}</strong>
+                    <small>{hostname(job.url)}</small>
+                    {job.transfer && <DownloadProgress transfer={job.transfer} />}
+                    {job.error && <small className="error">{job.error}</small>}
+                  </td>
                   <td><span className={`badge ${job.status}`}>{statusLabel[job.status]}</span>
                     {job.status === "complete" && job.expectedSha256 && <small>SHA-256 verified</small>}</td>
-                  <td className="file-size">{job.bytes > 0 || job.status === "complete" ? displaySize(job.bytes) : "—"}</td>
+                  <td className="file-size">
+                    {job.bytes > 0 || job.transfer || job.status === "complete" ? displaySize(job.bytes) : "—"}
+                    {job.transfer?.totalBytes != null && <small>of {displaySize(job.transfer.totalBytes)}</small>}
+                  </td>
                   <td>
                     {(job.status === "queued" || job.status === "downloading") && (
                       <button className="icon-button" title="Pause" aria-label={`Pause ${job.filename}`} onClick={() => void jobAction("pause_download", job.id)}><Pause size={16} /></button>

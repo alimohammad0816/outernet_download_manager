@@ -84,6 +84,13 @@ it. If the resource changes or declines the range request, the app starts a
 fresh single-connection transfer. Single-connection transfers and video
 assembly restart from the beginning after interruption.
 
+The list shows live progress, speed and an estimated remaining time for active
+desktop transfers with a known size. Transfers without a known total still
+show the received bytes and speed. In **Settings**, enter a speed limit per
+download in KiB/s, or leave it blank for unlimited speed. The limit is read
+when a transfer starts and shared by its parallel connections. Browser-assisted
+transfers use the configured limit when the matching extension is installed.
+
 An optional publisher SHA-256 can be entered when adding a direct link.
 Outernet compares the result with that reference before publication. For
 video, it requires all listed segments, checks output duration, and decodes
