@@ -25,3 +25,6 @@ tauri-plugin-single-instance = "2"
 tempfile = "3"
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-updater = "2.10.1"

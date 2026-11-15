@@ -474,6 +474,18 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(windows)]
+    pub fn while_workers_idle<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let workers = self.workers.lock().map_err(db_error)?;
+        if !workers.is_empty() {
+            return Err("Pause active downloads before installing an update.".into());
+        }
+        action()
+    }
+
     fn claim_next(&self) -> Result<Option<ClaimedDownload>, String> {
         let mut workers = self.workers.lock().map_err(db_error)?;
         let snapshot = self.read()?.ok_or("Missing application state.")?;

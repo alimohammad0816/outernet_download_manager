@@ -40,8 +40,22 @@ enum Request {
     },
 }
 
-fn allowed_origin() -> String {
-    format!("chrome-extension://{}/", EXTENSION_ID.trim())
+fn allowed_origins() -> Vec<String> {
+    let mut origins = vec![format!("chrome-extension://{}/", EXTENSION_ID.trim())];
+    for id in [
+        option_env!("OUTERNET_CHROME_EXTENSION_ID"),
+        option_env!("OUTERNET_EDGE_EXTENSION_ID"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|id| id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)))
+    {
+        let origin = format!("chrome-extension://{id}/");
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
 }
 
 pub fn launch_origin(mut args: impl Iterator<Item = OsString>) -> Option<String> {
@@ -66,7 +80,7 @@ pub fn launch_origin(mut args: impl Iterator<Item = OsString>) -> Option<String>
 }
 
 pub fn run_host(origin: &str) -> io::Result<()> {
-    if origin != allowed_origin() && origin != FIREFOX_ID.trim() {
+    if !allowed_origins().iter().any(|allowed| allowed == origin) && origin != FIREFOX_ID.trim() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Unknown extension origin.",
@@ -309,7 +323,7 @@ pub fn register(browser: &str) -> Result<(), String> {
     if browser == "firefox" {
         manifest["allowed_extensions"] = json!([FIREFOX_ID.trim()]);
     } else {
-        manifest["allowed_origins"] = json!([allowed_origin()]);
+        manifest["allowed_origins"] = json!(allowed_origins());
     }
     let mut staged = NamedTempFile::new_in(&directory).map_err(|error| error.to_string())?;
     serde_json::to_writer_pretty(staged.as_file_mut(), &manifest)

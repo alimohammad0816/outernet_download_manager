@@ -142,6 +142,54 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn updates_enabled(app: tauri::AppHandle) -> bool {
+    cfg!(windows) && app.config().plugins.0.contains_key("updater")
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    if !updates_enabled(app.clone()) {
+        return Err("Updates are unavailable for this build.".into());
+    }
+    app.updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map(|update| update.map(|update| update.version))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<Store>>,
+    version: String,
+) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    if !updates_enabled(app.clone()) {
+        return Err("Updates are unavailable for this build.".into());
+    }
+    let update = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+        .filter(|update| update.version == version)
+        .ok_or("Check for updates again. The available version has changed.")?;
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())?;
+    store.while_workers_idle(|| update.install(bytes).map_err(|error| error.to_string()))
+}
+
 fn main() {
     if let Some(origin) = browser::launch_origin(std::env::args_os().skip(1)) {
         if let Err(error) = browser::run_host(&origin) {
@@ -149,10 +197,11 @@ fn main() {
         }
         return;
     }
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main(app)
-        }))
+        }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
@@ -171,6 +220,11 @@ fn main() {
             }
         })
         .setup(|app| {
+            #[cfg(windows)]
+            if updates_enabled(app.handle().clone()) {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
             let data = app.path().app_local_data_dir()?;
             let store = Arc::new(open_store(&data)?);
             store.recover().map_err(io::Error::other)?;
@@ -213,7 +267,12 @@ fn main() {
             pause_download,
             connect_browser,
             schedule_queue,
-            set_priority
+            set_priority,
+            updates_enabled,
+            #[cfg(windows)]
+            check_update,
+            #[cfg(windows)]
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("Outernet could not start");

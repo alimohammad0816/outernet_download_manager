@@ -161,6 +161,58 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
   );
 }
 
+function UpdateControls() {
+  const [enabled, setEnabled] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    void invoke<boolean>("updates_enabled").then(setEnabled).catch(() => setEnabled(false));
+  }, []);
+
+  async function check() {
+    setBusy(true);
+    setVersion(null);
+    setMessage("");
+    try {
+      const available = await invoke<string | null>("check_update");
+      setVersion(available);
+      setMessage(available ? `Version ${available} is available.` : "Outernet is up to date.");
+    } catch (failure) {
+      setMessage(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function install() {
+    setBusy(true);
+    setMessage("Downloading and verifying the signed installer…");
+    try {
+      await invoke("install_update", { version });
+    } catch (failure) {
+      setMessage(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return enabled && (
+    <div className="field">
+      <button type="button" className="button secondary" onClick={() => void check()} disabled={busy}>
+        Check for updates
+      </button>
+      {message && <small role="status">{message}</small>}
+      {version && (
+        <button type="button" className="button secondary" onClick={() => void install()} disabled={busy}>
+          Install and restart
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClose: () => void; onSave: () => Promise<void> }) {
   const [paths, setPaths] = useState(settings);
   const [limit, setLimit] = useState(settings.speedLimitKib?.toString() ?? "");
@@ -218,6 +270,7 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
           onChange={event => setPaths({ ...paths, keepRunning: event.target.checked })} /> Keep running in the system tray when closed</label>
         <label className="checkbox"><input type="checkbox" checked={paths.notifyWhenFinished}
           onChange={event => setPaths({ ...paths, notifyWhenFinished: event.target.checked })} /> Notify me when a download completes</label>
+        <UpdateControls />
         <FormActions busy={busy} error={error} onClose={onClose} label="Save settings" />
       </form>
     </Modal>
