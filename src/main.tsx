@@ -489,7 +489,7 @@ function App() {
   return (
     <div className="layout">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-icon"><ArrowDownToLine size={21} /></span> Outernet</div>
+        <div className="brand"><img className="brand-icon" src="/outernet.svg" width={34} height={34} alt="" /> Outernet</div>
         <nav aria-label="Download filters">
           {filters.map(({ icon: Icon, label, key }) => (
             <button key={key} className={filter === key ? "nav-button selected" : "nav-button"} aria-pressed={filter === key} onClick={() => setFilter(key)}>
