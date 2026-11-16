@@ -1,10 +1,13 @@
-use crate::network::Binding;
+use crate::{
+    network::Binding,
+    proxy::{ProxySettings, ResolvedProxy},
+};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -16,6 +19,8 @@ pub struct TransferControl {
     paused: AtomicBool,
     held_for_queue: AtomicBool,
     binding: Option<Binding>,
+    proxy_settings: ProxySettings,
+    proxy: OnceLock<ResolvedProxy>,
     finish_requested: AtomicBool,
     received: AtomicU64,
     completed: AtomicU64,
@@ -35,15 +40,21 @@ pub struct TransferProgress {
 
 impl TransferControl {
     pub fn new(limit_kib: Option<u32>) -> Self {
-        Self::with_binding(limit_kib, None)
+        Self::with_network(limit_kib, None, &ProxySettings::Direct)
     }
 
-    pub fn with_binding(limit_kib: Option<u32>, binding: Option<Binding>) -> Self {
+    pub fn with_network(
+        limit_kib: Option<u32>,
+        binding: Option<Binding>,
+        proxy: &ProxySettings,
+    ) -> Self {
         let now = Instant::now();
         Self {
             paused: AtomicBool::new(false),
             held_for_queue: AtomicBool::new(false),
             binding,
+            proxy_settings: proxy.clone(),
+            proxy: OnceLock::new(),
             finish_requested: AtomicBool::new(false),
             received: AtomicU64::new(0),
             completed: AtomicU64::new(0),
@@ -60,6 +71,10 @@ impl TransferControl {
 
     pub fn recording_finished(&self) -> bool {
         self.finish_requested.load(Ordering::Relaxed)
+    }
+
+    pub fn proxy(&self) -> &ResolvedProxy {
+        self.proxy.get_or_init(|| self.proxy_settings.resolve())
     }
 
     pub fn binding(&self) -> Option<&Binding> {

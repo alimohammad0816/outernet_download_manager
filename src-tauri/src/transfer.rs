@@ -210,9 +210,11 @@ pub fn http_client(
     } else {
         Policy::none()
     };
-    let client = reqwest::blocking::Client::builder();
+    let client = control
+        .proxy()
+        .configure_client(reqwest::blocking::Client::builder())?;
     let client = if let Some(binding) = control.binding() {
-        let client = client.no_proxy().local_address(binding.address);
+        let client = client.local_address(binding.address);
         #[cfg(target_os = "linux")]
         let client = client.interface(&binding.name);
         client

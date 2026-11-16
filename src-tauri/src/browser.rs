@@ -390,6 +390,7 @@ mod tests {
             working_folder: root.path().join("work"),
             destination_folder: root.path().join("destination"),
             speed_limit_kib: None,
+            proxy: Default::default(),
             download_slots: 1,
             keep_running: false,
             notify_when_finished: false,

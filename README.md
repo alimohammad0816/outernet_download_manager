@@ -130,6 +130,15 @@ IP through yt-dlp. The system manages routing and DNS. Browser-assisted
 transfers that Chrome or Firefox fetch themselves use the browser's own
 network route. Other links sent from the extension enter **Main queue**.
 
+Under **Settings → Network → Proxy**, select **System proxy**, **Direct**, or
+**Custom**. System mode follows proxy environment variables and manual proxy
+settings from Windows or GNOME on Linux. Custom mode accepts HTTP, HTTPS,
+SOCKS5 and SOCKS5h URLs without credentials, for example
+`socks5h://127.0.0.1:1080`. Changes apply when Outernet starts the next transfer.
+On a queue with a selected interface, Outernet connects to the proxy through
+that interface's source address. Browser-assisted transfers use browser
+settings. Automatic PAC scripts are unsupported.
+
 In **Add download** choose the destination queue, or use **Move to queue** in
 a row's action menu. Sort the list by date added, name, size, status or priority.
 New downloads start in priority order within the global schedule, with older

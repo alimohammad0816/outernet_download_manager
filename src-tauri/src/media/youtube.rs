@@ -99,9 +99,10 @@ fn download_track(
         .arg(format!("{name}.%(ext)s"))
         .stdout(File::create(&metadata).map_err(disk_error)?)
         .stderr(stderr.try_clone().map_err(disk_error)?);
+    control.proxy().configure_command(&mut command);
     if let Some(binding) = control.binding() {
         command
-            .args(["--proxy", "", "--source-address"])
+            .arg("--source-address")
             .arg(binding.address.to_string());
     }
     if let Some(limit) = control.speed_limit_bytes() {

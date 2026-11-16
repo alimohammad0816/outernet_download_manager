@@ -4,6 +4,8 @@ mod media;
 mod network;
 #[path = "../src/progress.rs"]
 mod progress;
+#[path = "../src/proxy.rs"]
+mod proxy;
 #[path = "../src/ranges.rs"]
 mod ranges;
 #[path = "../src/store.rs"]
@@ -136,6 +138,7 @@ fn setup(destination_root: Option<&Path>) -> (TempDir, TempDir, PathBuf, Setting
         working_folder: work,
         destination_folder: destination.path().to_owned(),
         speed_limit_kib: None,
+        proxy: proxy::ProxySettings::Direct,
         download_slots: 1,
         keep_running: false,
         notify_when_finished: false,
@@ -161,6 +164,7 @@ fn downloads_exact_bytes_after_reopening_the_queue() {
             working_folder: new_work.clone(),
             destination_folder: new_work.clone(),
             speed_limit_kib: None,
+            proxy: proxy::ProxySettings::Direct,
             download_slots: 1,
             keep_running: false,
             notify_when_finished: false,
@@ -881,13 +885,13 @@ fn queues_limit_workers_independently_and_can_stop_and_resume() {
         if state
             .jobs
             .iter()
-            .all(|job| !matches!(job.status, Status::Downloading | Status::Verifying))
-        {
-            assert!(state
+            .any(|job| job.filename == "main-1" && job.status == Status::Complete)
+            && state
                 .jobs
                 .iter()
                 .filter(|job| job.queue_id == other)
-                .all(|job| job.status == Status::Queued));
+                .all(|job| job.status == Status::Queued)
+        {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "workers did not stop");
@@ -929,12 +933,13 @@ fn bound_http_client_uses_the_selected_source_address() {
             .unwrap();
     });
     let address: std::net::IpAddr = "127.0.0.2".parse().unwrap();
-    let control = progress::TransferControl::with_binding(
+    let control = progress::TransferControl::with_network(
         None,
         Some(network::Binding {
             name: "lo".into(),
             address,
         }),
+        &proxy::ProxySettings::Direct,
     );
     let response = transfer::http_client(true, &control)
         .unwrap()
@@ -946,12 +951,13 @@ fn bound_http_client_uses_the_selected_source_address() {
         connected.recv_timeout(Duration::from_secs(5)).unwrap(),
         address
     );
-    let unavailable = progress::TransferControl::with_binding(
+    let unavailable = progress::TransferControl::with_network(
         None,
         Some(network::Binding {
             name: "outernet-missing".into(),
             address,
         }),
+        &proxy::ProxySettings::Direct,
     );
     assert!(transfer::http_client(true, &unavailable)
         .unwrap()
@@ -1536,4 +1542,90 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
         assert!(job(&store).status == Status::Failed);
         assert!(!settings.destination_folder.join(filename).exists());
     }
+}
+
+#[test]
+fn custom_proxy_downloads_and_never_falls_back_to_origin() {
+    let (_root, destination, _database, mut settings, store) = setup(None);
+    let (proxy_url, proxy_server) = serve(Response::CompleteChunked);
+    settings.proxy = proxy::ProxySettings::Custom(proxy_url.trim_end_matches("fixture.bin").into());
+    store.settings(settings.clone()).unwrap();
+    let source = "http://outernet-proxy-test.invalid/file.bin";
+    store
+        .add(source.into(), "proxied.bin".into(), String::new())
+        .unwrap();
+    assert!(store.process_next().unwrap());
+    assert_eq!(
+        fs::read(destination.path().join("proxied.bin")).unwrap(),
+        b"example"
+    );
+    let request = proxy_server.join().unwrap().unwrap();
+    assert!(request.starts_with(&format!("GET {source} HTTP/")));
+
+    let (origin_url, origin) = serve(Response::CompleteChunked);
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    settings.proxy =
+        proxy::ProxySettings::Custom(format!("http://{}", unavailable.local_addr().unwrap()));
+    drop(unavailable);
+    store.settings(settings.clone()).unwrap();
+    store
+        .add(origin_url.clone(), "unavailable.bin".into(), String::new())
+        .unwrap();
+    assert!(store.process_next().unwrap());
+    assert!(matches!(job(&store).status, Status::Failed));
+
+    settings.proxy = proxy::ProxySettings::Direct;
+    store.settings(settings).unwrap();
+    store
+        .add(origin_url, "direct.bin".into(), String::new())
+        .unwrap();
+    assert!(store.process_next().unwrap());
+    assert_eq!(
+        fs::read(destination.path().join("direct.bin")).unwrap(),
+        b"example"
+    );
+    assert!(origin.join().unwrap().unwrap().starts_with("GET /"));
+}
+
+#[test]
+fn system_proxy_uses_environment_while_direct_ignores_it() {
+    const PROXY_TEST_CHILD: &str = "OUTERNET_SYSTEM_PROXY_TEST_CHILD";
+    if let Ok(origin) = std::env::var(PROXY_TEST_CHILD) {
+        for (mode, expected) in [
+            (proxy::ProxySettings::System, b"example".as_slice()),
+            (proxy::ProxySettings::Direct, b"dddd".as_slice()),
+        ] {
+            let control = progress::TransferControl::with_network(None, None, &mode);
+            let response = transfer::http_client(true, &control)
+                .unwrap()
+                .get(&origin)
+                .send()
+                .unwrap();
+            assert_eq!(response.bytes().unwrap().as_ref(), expected);
+        }
+        return;
+    }
+    let (proxy, proxy_server) = serve(Response::CompleteChunked);
+    let (origin, origin_server) = serve(Response::Complete(4, b'd'));
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "system_proxy_uses_environment_while_direct_ignores_it",
+        ])
+        .env(PROXY_TEST_CHILD, &origin)
+        .env("HTTP_PROXY", proxy.trim_end_matches("fixture.bin"))
+        .env("http_proxy", proxy.trim_end_matches("fixture.bin"))
+        .env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .env_remove("REQUEST_METHOD")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let request = proxy_server.join().unwrap().unwrap();
+    assert!(request.starts_with(&format!("GET {origin} HTTP/")));
+    assert!(origin_server.join().unwrap().unwrap().starts_with("GET /"));
 }

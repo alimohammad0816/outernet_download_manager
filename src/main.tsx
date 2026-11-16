@@ -6,7 +6,10 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
+type ProxyMode = "system" | "direct" | "custom";
+type ProxySettings = { mode: "system" | "direct" } | { mode: "custom"; url: string };
 type Settings = {
+  proxy: ProxySettings;
   workingFolder: string;
   destinationFolder: string;
   speedLimitKib: number | null;
@@ -349,6 +352,8 @@ function UpdateControls() {
 
 function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClose: () => void; onSave: () => Promise<void> }) {
   const [paths, setPaths] = useState(settings);
+  const [proxyMode, setProxyMode] = useState<ProxyMode>(settings.proxy.mode);
+  const [proxyUrl, setProxyUrl] = useState(settings.proxy.mode === "custom" ? settings.proxy.url : "");
   const [limit, setLimit] = useState(settings.speedLimitKib?.toString() ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -367,7 +372,8 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
     setBusy(true);
     setError("");
     try {
-      await invoke("save_settings", { settings: { ...paths, speedLimitKib: limit ? Number(limit) : null } });
+      const proxy: ProxySettings = proxyMode === "custom" ? { mode: proxyMode, url: proxyUrl.trim() } : { mode: proxyMode };
+      await invoke("save_settings", { settings: { ...paths, proxy, speedLimitKib: limit ? Number(limit) : null } });
       await onSave();
       onClose();
     } catch (failure) {
@@ -378,7 +384,7 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
   }
 
   return (
-    <Modal title="Settings" description="Storage, transfer limits and desktop behavior." mark={<Settings2 size={20} />}
+    <Modal title="Settings" description="Storage, transfers, network and desktop behavior." mark={<Settings2 size={20} />}
       className="workspace-dialog settings-dialog" onClose={onClose}>
       <form className="workspace-form" onSubmit={submit}>
         <div className="workspace-body">
@@ -401,6 +407,28 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
               <input type="number" min="1" max="1048576" step="1" inputMode="numeric" placeholder="Unlimited"
                 value={limit} onChange={event => setLimit(event.target.value)} />
             </label>
+          </section>
+          <section className="settings-section">
+            <h3>Network</h3>
+            <fieldset className="proxy-field">
+              <legend>Proxy</legend>
+              <div className="proxy-modes">
+                {([["system", "System proxy"], ["direct", "Direct"], ["custom", "Custom"]] as const).map(([mode, label]) => (
+                  <label key={mode}>
+                    <input type="radio" name="proxy-mode" value={mode} checked={proxyMode === mode}
+                      onChange={() => setProxyMode(mode)} />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            {proxyMode === "custom" && (
+              <label>Proxy URL
+                <input type="url" autoComplete="off" spellCheck={false} placeholder="http://127.0.0.1:8080"
+                  value={proxyUrl} onChange={event => setProxyUrl(event.target.value)} required />
+              </label>
+            )}
+            <p className="muted">Applies to transfers started by Outernet. Browser-assisted transfers use the browser’s connection.</p>
           </section>
           <section className="settings-section">
             <h3>Desktop</h3>

@@ -188,8 +188,16 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .settings-dialog { width: min(calc(100vw - 40px), 630px); }
 .settings-section { display: grid; gap: 9px; padding: 11px; border: 1px solid #2b3436; border-radius: 10px; background: #13181a; }
 .settings-section h3 { margin: 0; font-size: 13px; }
-.settings-section input:not([type="checkbox"]) { background: #0d1113; border-color: #30373b; }
+.settings-section input:not([type="checkbox"], [type="radio"]) { background: #0d1113; border-color: #30373b; }
 .settings-section p { font-size: 12px; }
+.proxy-field { padding: 0; margin: 0; border: 0; min-width: 0; }
+.proxy-field legend { padding: 0; margin-bottom: 6px; font-size: 13px; }
+.proxy-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid #2b3436; border-radius: 8px; background: #202426; }
+.proxy-modes label { position: relative; cursor: pointer; }
+.proxy-modes input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.proxy-modes span { display: block; padding: 6px 4px; border-radius: 5px; text-align: center; font-size: 12px; }
+.proxy-modes input:checked + span { color: #f4f4f5; background: #0d1113; }
+.proxy-modes input:focus-visible + span { outline: 1px solid #f4f4f5; }
 .folder-input .button { min-height: 37px; }
 .switch-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; font-weight: 500; }
 .switch-row input { appearance: none; position: relative; box-sizing: border-box; width: 32px; height: 18px; margin: 0; padding: 0; border: 1px solid #494e50; border-radius: 20px; background: #24292c; flex: none; cursor: pointer; }

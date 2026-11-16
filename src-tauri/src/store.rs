@@ -2,6 +2,7 @@ use crate::{
     media::{self, Format},
     network,
     progress::{TransferControl, TransferProgress, MAX_SPEED_KIB},
+    proxy::ProxySettings,
     ranges, transfer,
 };
 use chrono::{Local, Timelike};
@@ -22,6 +23,8 @@ pub struct Settings {
     pub destination_folder: PathBuf,
     #[serde(default)]
     pub speed_limit_kib: Option<u32>,
+    #[serde(default)]
+    pub proxy: ProxySettings,
     #[serde(default = "default_slots")]
     pub download_slots: u8,
     #[serde(default)]
@@ -287,6 +290,7 @@ impl Store {
         if !(1..=8).contains(&settings.download_slots) {
             return Err("Choose between one and eight simultaneous downloads.".into());
         }
+        let proxy = settings.proxy.validated()?;
         let working_folder = transfer::normalize_folder(settings.working_folder)?;
 
         let destination_folder = transfer::normalize_folder(settings.destination_folder)?;
@@ -301,6 +305,7 @@ impl Store {
             state.settings = Settings {
                 working_folder,
                 destination_folder,
+                proxy,
                 ..settings
             };
             Ok(())
@@ -844,9 +849,10 @@ impl Store {
         } else {
             None
         };
-        let control = Arc::new(TransferControl::with_binding(
+        let control = Arc::new(TransferControl::with_network(
             snapshot.settings.speed_limit_kib,
             binding,
+            &snapshot.settings.proxy,
         ));
         if job.status == Status::Queued {
             job.status = Status::Downloading;
