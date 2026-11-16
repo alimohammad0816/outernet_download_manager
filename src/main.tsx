@@ -1,7 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDown, ArrowDownToLine, ArrowUp, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, ListFilter, Layers, Link, Minus, MoreHorizontal, Pause, Play, Plus, RefreshCw, Settings2, Square, SquareDashed, X } from "lucide-react";
+import { ArrowDown, ArrowDownToLine, ArrowUp, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, ListFilter, Layers, Link, Minus, MoreHorizontal, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -776,24 +776,15 @@ const resizeDirections = ["North", "South", "East", "West", "NorthEast", "NorthW
 
 function WindowControls({ onError }: { onError: (error: string) => void }) {
   const appWindow = getCurrentWindow();
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    const update = () => void appWindow.isMaximized().then(setMaximized).catch(() => {});
-    update();
-    const session = appWindow.onResized(update).catch(() => undefined);
-    return () => { void session.then(unlisten => unlisten?.()); };
-  }, [appWindow.label]);
   function operate(action: () => Promise<void>) {
     void action().catch(error => onError(describe(error)));
   }
   return <>
     <div className="window-controls">
       <button className="icon-button" title="Minimize" aria-label="Minimize" onClick={() => operate(() => appWindow.minimize())}><Minus size={15} /></button>
-      <button className="icon-button" title={maximized ? "Restore" : "Maximize"} aria-label={maximized ? "Restore" : "Maximize"}
-        onClick={() => operate(() => appWindow.toggleMaximize())}>{maximized ? <SquareDashed size={13} /> : <Square size={12} />}</button>
       <button className="icon-button window-close" title="Close" aria-label="Close window" onClick={() => operate(() => appWindow.close())}><X size={15} /></button>
     </div>
-    {!maximized && resizeDirections.map(direction => <span key={direction} aria-hidden="true" className={`resize-grip resize-${direction.toLowerCase()}`}
+    {resizeDirections.map(direction => <span key={direction} aria-hidden="true" className={`resize-grip resize-${direction.toLowerCase()}`}
       onPointerDown={event => { if (event.button === 0) operate(() => appWindow.startResizeDragging(direction)); }} />)}
   </>;
 }
@@ -1000,7 +991,11 @@ function App() {
 
   return (
     <div className="layout">
-      <header className="app-header" data-tauri-drag-region>
+      <header className="app-header" onMouseDown={event => {
+        if (event.button === 0 && event.detail === 1 && event.target === event.currentTarget) {
+          void getCurrentWindow().startDragging().catch(error => setActionError(describe(error)));
+        }
+      }}>
         <div className="brand"><img className="brand-icon" src="/outernet.svg" width={28} height={28} alt="" /> Outernet</div>
         <div className="app-actions">
           <button className="icon-button" title="Queue schedule" aria-label="Queue schedule" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /></button>
