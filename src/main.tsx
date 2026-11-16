@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, HardDrive, ListFilter, Layers, Link, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { ArrowDownToLine, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, HardDrive, ListFilter, Layers, Link, MoreHorizontal, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -21,9 +21,10 @@ type Job = {
   id: string;
   url: string;
   filename: string;
-  format?: "file" | "hls" | "hls_live" | "dash";
+  format?: "file" | "hls" | "hls_live" | "dash" | "youtube";
   status: Status;
   priority: Priority;
+  settings: Settings;
   expectedSha256: string | null;
   sha256: string | null;
   error: string | null;
@@ -656,11 +657,90 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
   );
 }
 
+type DownloadAction = "open" | "reveal" | "properties" | "forget" | "pause" | "retry" | "replace" | "stop";
+type MenuAnchor = { id: string; x: number; y: number; previous: HTMLElement };
+
+function DownloadMenu({ job, anchor, onClose, onAction }: {
+  job: Job; anchor: MenuAnchor; onClose: () => void; onAction: (action: DownloadAction) => void;
+}) {
+  const menu = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    element.style.left = `${Math.max(8, Math.min(anchor.x, innerWidth - element.offsetWidth - 8))}px`;
+    element.style.top = `${Math.max(8, Math.min(anchor.y, innerHeight - element.offsetHeight - 8))}px`;
+    element.querySelector("button")?.focus();
+  }, [anchor]);
+  useEffect(() => {
+    function dismiss(event: PointerEvent) {
+      if (event.target instanceof Node && !menu.current?.contains(event.target)) onClose();
+    }
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("resize", onClose);
+    window.addEventListener("blur", onClose);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("resize", onClose);
+      window.removeEventListener("blur", onClose);
+    };
+  }, [onClose]);
+
+  const options: Array<[DownloadAction, string]> = [];
+  if (job.status === "complete") options.push(["open", "Open file"], ["reveal", "Show in folder"]);
+  if (job.status === "downloading" && job.format === "hls_live") options.push(["stop", "Stop and save recording"]);
+  else if (job.status === "queued" || job.status === "downloading") options.push(["pause", "Pause"]);
+  if (job.status === "paused" || job.status === "failed") {
+    options.push(["retry", job.status === "paused" ? "Resume" : "Retry"]);
+    if (!job.sha256) options.push(["replace", "Replace link"]);
+  }
+  options.push(["properties", "Properties"]);
+  if (job.status === "complete") options.push(["forget", "Remove from history"]);
+
+  return <div className="download-menu" role="menu" aria-label={`Actions for ${job.filename}`} ref={menu}
+    onKeyDown={event => {
+      if (event.key === "Escape" || event.key === "Tab") {
+        if (event.key === "Escape") event.preventDefault();
+        onClose();
+        anchor.previous.focus();
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        const buttons = Array.from(menu.current?.querySelectorAll("button") ?? []);
+        if (!buttons.length) return;
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 :
+          (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next]?.focus();
+      }
+    }}>
+    {options.map(([key, text]) => <button key={key} type="button" role="menuitem"
+      className={key === "forget" ? "history-action" : undefined} onClick={() => onAction(key)}>{text}</button>)}
+  </div>;
+}
+
+function DownloadProperties({ job, onClose }: { job: Job; onClose: () => void }) {
+  return <Modal title="Download properties" description={job.filename} className="workspace-dialog" mark={<File size={20} />} onClose={onClose}>
+    <div className="workspace-body">
+      <dl className="download-properties">
+        <div><dt>Status</dt><dd>{statusLabel[job.status]}</dd></div>
+        <div><dt>Size</dt><dd>{displaySize(job.bytes)}</dd></div>
+        <div><dt>Destination folder</dt><dd>{job.settings.destinationFolder}</dd></div>
+        <div><dt>Source URL</dt><dd>{job.url}</dd></div>
+        {job.sha256 && <div><dt>SHA-256</dt><dd className="checksum">{job.sha256}</dd></div>}
+        {job.error && <div><dt>Error</dt><dd>{job.error}</dd></div>}
+      </dl>
+    </div>
+    <div className="workspace-footer"><button className="button secondary" type="button" onClick={onClose}>Done</button></div>
+  </Modal>;
+}
+
 function App() {
   const [state, setState] = useState<Snapshot>();
   const [filter, setFilter] = useState<Filter>("all");
   const [category, setCategory] = useState("");
   const [replacement, setReplacement] = useState<Job | null>(null);
+  const [propertiesId, setPropertiesId] = useState<string | null>(null);
+  const [menu, setMenu] = useState<MenuAnchor | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -706,7 +786,37 @@ function App() {
     }
   }
 
+  async function openFile(id: string, reveal = false) {
+    setActionError("");
+    try {
+      await invoke("open_download", { id, reveal });
+    } catch (failure) {
+      setActionError(describe(failure));
+    }
+  }
+
+  async function menuAction(job: Job, action: DownloadAction) {
+    closeMenu();
+    menu?.previous.focus();
+    if (action === "properties") setPropertiesId(job.id);
+    else if (action === "replace") setReplacement(job);
+    else if (action === "open" || action === "reveal") await openFile(job.id, action === "reveal");
+    else if (action === "forget") {
+      setActionError("");
+      try {
+        await invoke("remove_completed_download", { id: job.id });
+        await refresh();
+      } catch (failure) {
+        setActionError(describe(failure));
+      }
+    } else {
+      await jobAction(action === "pause" ? "pause_download" : action === "retry" ? "retry_download" : "stop_recording", job.id);
+    }
+  }
+
   const jobs = state?.jobs ?? [];
+  const menuJob = menu ? jobs.find(job => job.id === menu.id) : null;
+  const properties = jobs.find(job => job.id === propertiesId);
   const activeJobs = jobs.filter(job => job.status === "downloading");
   const transferRate = activeJobs.reduce((total, job) => total + (job.transfer?.bytesPerSecond ?? 0), 0);
   const queued = jobs.filter(job => job.status === "queued").length;
@@ -768,7 +878,24 @@ function App() {
             <thead><tr><th>File</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>
             <tbody>
               {visible.map(job => (
-                <tr key={job.id}>
+                <tr key={job.id} className={job.status === "complete" ? "openable-row" : undefined} tabIndex={0}
+                  data-menu-open={menu?.id === job.id}
+                  onDoubleClick={event => {
+                    if (job.status === "complete" && event.target instanceof Element && !event.target.closest("button")) void openFile(job.id);
+                  }}
+                  onContextMenu={event => {
+                    event.preventDefault();
+                    setMenu({ id: job.id, x: event.clientX, y: event.clientY, previous: event.currentTarget });
+                  }}
+                  onKeyDown={event => {
+                    if (event.target !== event.currentTarget) return;
+                    if (event.key === "Enter" && job.status === "complete") void openFile(job.id);
+                    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                      event.preventDefault();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      setMenu({ id: job.id, x: rect.left + 16, y: rect.top + 20, previous: event.currentTarget });
+                    }
+                  }}>
                   <td>
                     <div className="file-cell"><span className="file-mark"><File size={16} /></span><div className="file-details">
                       <strong className="filename" title={job.filename}>{job.filename}</strong>
@@ -805,10 +932,11 @@ function App() {
                         {job.status === "paused" ? <Play size={16} /> : <RefreshCw size={16} />}
                       </button>
                     )}
-                    {(job.status === "paused" || job.status === "failed") && !job.sha256 && (
-                      <button className="icon-button" title="Replace link" aria-label={`Replace link for ${job.filename}`}
-                        onClick={() => setReplacement(job)}><Link size={16} /></button>
-                    )}
+                    <button className="icon-button" type="button" title="More actions" aria-label={`More actions for ${job.filename}`}
+                      aria-haspopup="menu" aria-expanded={menu?.id === job.id} onClick={event => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setMenu({ id: job.id, x: rect.right - 190, y: rect.bottom + 4, previous: event.currentTarget });
+                      }}><MoreHorizontal size={17} /></button>
                   </td>
                 </tr>
               ))}
@@ -824,6 +952,9 @@ function App() {
         </section>
         {state && <footer><HardDrive size={15} /><button title={state.settings.workingFolder} onClick={() => setPanel("settings")}>In progress · {state.settings.workingFolder}</button></footer>}
       </main>
+      {menu && menuJob && <DownloadMenu job={menuJob} anchor={menu} onClose={closeMenu}
+        onAction={action => void menuAction(menuJob, action)} />}
+      {properties && <DownloadProperties job={properties} onClose={() => setPropertiesId(null)} />}
       {panel === "schedule" && state && <ScheduleForm runAfter={state.run_after} dailyWindow={state.daily_window} onClose={closePanel} onSave={refresh} />}
       {panel === "browser" && <BrowserSettings onClose={closePanel} />}
       {replacement && <ReplaceLink job={replacement} onClose={() => setReplacement(null)} onSave={refresh} />}

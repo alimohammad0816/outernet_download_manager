@@ -211,3 +211,18 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .browser-help summary { cursor: pointer; }
 .browser-help p { padding-top: 8px; }
 .message { color: var(--accent); }
+
+.openable-row { cursor: default; }
+.openable-row .filename { cursor: pointer; }
+.download-list tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.download-list tr[data-menu-open="true"] { background: #1b2323; }
+.download-menu { position: fixed; z-index: 10; min-width: 190px; max-width: calc(100vw - 16px); padding: 4px; border: 1px solid #34403f; border-radius: 9px; background: #171c1e; box-shadow: 0 12px 32px #0009; }
+.download-menu button { display: block; width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 5px; background: transparent; text-align: left; }
+.download-menu button:hover, .download-menu button:focus-visible { background: #25312f; outline: none; }
+.download-menu .history-action { border-top: 1px solid #2b3436; margin-top: 3px; color: #b6c1c2; }
+.download-properties { display: grid; margin: 0; border: 1px solid #2b3436; border-radius: 10px; background: #13181a; }
+.download-properties div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; padding: 10px 12px; }
+.download-properties div + div { border-top: 1px solid #2b3436; }
+.download-properties dt { color: var(--muted); }
+.download-properties dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
+.download-properties .checksum { font-family: "IBM Plex Mono", ui-monospace, monospace; }

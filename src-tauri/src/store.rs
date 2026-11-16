@@ -323,10 +323,10 @@ impl Store {
         let max_height = max_height.filter(|height| (1..=4320).contains(height));
         let mut filename = filename.trim().to_string();
         if format != Format::File && !filename.to_ascii_lowercase().ends_with(".mkv") {
-            let suffix = if matches!(format, Format::Hls | Format::HlsLive) {
-                ".m3u8"
-            } else {
-                ".mpd"
+            let suffix = match format {
+                Format::Hls | Format::HlsLive => ".m3u8",
+                Format::Dash => ".mpd",
+                _ => "",
             };
             if filename.to_ascii_lowercase().ends_with(suffix) {
                 filename.truncate(filename.len() - suffix.len());
@@ -359,6 +359,34 @@ impl Store {
             bytes: 0,
             transfer: None,
             attempt: None,
+        })
+    }
+
+    pub fn completed_path(&self, id: &str) -> Result<PathBuf, String> {
+        let state = self.read()?.ok_or("Missing application state.")?;
+        let job = state
+            .jobs
+            .into_iter()
+            .find(|job| job.id == id)
+            .ok_or("Download not found.")?;
+        if job.status != Status::Complete || !transfer::valid_name(&job.filename) {
+            return Err("Choose a completed download.".into());
+        }
+        Ok(job.destination())
+    }
+
+    pub fn remove_completed(&self, id: &str) -> Result<(), String> {
+        self.update(|state| {
+            let index = state
+                .jobs
+                .iter()
+                .position(|job| job.id == id)
+                .ok_or("Download not found.")?;
+            if state.jobs[index].status != Status::Complete {
+                return Err("Only completed downloads can be removed from history.".into());
+            }
+            state.jobs.remove(index);
+            Ok(())
         })
     }
 

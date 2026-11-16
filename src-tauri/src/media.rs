@@ -2,6 +2,8 @@
 mod dash;
 #[path = "media/live.rs"]
 mod live;
+#[path = "media/youtube.rs"]
+mod youtube;
 
 use crate::{progress::TransferControl, transfer};
 use aws_lc_rs::{
@@ -33,12 +35,15 @@ pub enum Format {
     Hls,
     HlsLive,
     Dash,
+    Youtube,
 }
 
 impl Format {
     pub fn from_url(url: &Url) -> Self {
         let path = url.path().to_ascii_lowercase();
-        if path.ends_with(".m3u8") {
+        if youtube::video_id(url).is_some() {
+            Self::Youtube
+        } else if path.ends_with(".m3u8") {
             Self::Hls
         } else if path.ends_with(".mpd") {
             Self::Dash
@@ -57,9 +62,7 @@ pub fn download(
 ) -> Result<(), String> {
     control.check()?;
     fs::create_dir(directory).map_err(disk_error)?;
-    let client = transfer::http_client(true)?;
     let url = transfer::parse_url(url)?;
-    let (manifest_url, manifest) = read_manifest(&client, &url)?;
     let mut ffmpeg = media_command("ffmpeg");
     ffmpeg.args([
         "-nostdin",
@@ -70,35 +73,41 @@ pub fn download(
         "-abort_on",
         "empty_output+empty_output_stream",
     ]);
-    let duration = match format {
-        Format::Hls => prepare_hls(
-            &client,
-            directory,
-            manifest_url,
-            manifest,
-            &mut ffmpeg,
-            max_height,
-            control,
-        )?,
-        Format::HlsLive => live::record(
-            &client,
-            directory,
-            manifest_url,
-            manifest,
-            &mut ffmpeg,
-            max_height,
-            control,
-        )?,
-        Format::Dash => dash::prepare(
-            &client,
-            directory,
-            &manifest_url,
-            &manifest,
-            &mut ffmpeg,
-            max_height,
-            control,
-        )?,
-        Format::File => return Err("Select a video stream format.".into()),
+    let duration = if format == Format::Youtube {
+        youtube::prepare(&url, directory, &mut ffmpeg, max_height, control)?
+    } else {
+        let client = transfer::http_client(true)?;
+        let (manifest_url, manifest) = read_manifest(&client, &url)?;
+        match format {
+            Format::Hls => prepare_hls(
+                &client,
+                directory,
+                manifest_url,
+                manifest,
+                &mut ffmpeg,
+                max_height,
+                control,
+            )?,
+            Format::HlsLive => live::record(
+                &client,
+                directory,
+                manifest_url,
+                manifest,
+                &mut ffmpeg,
+                max_height,
+                control,
+            )?,
+            Format::Dash => dash::prepare(
+                &client,
+                directory,
+                &manifest_url,
+                &manifest,
+                &mut ffmpeg,
+                max_height,
+                control,
+            )?,
+            Format::File | Format::Youtube => return Err("Select a video stream format.".into()),
+        }
     };
     ffmpeg
         .args(["-sn", "-dn", "-c", "copy", "-f", "matroska", "-n"])

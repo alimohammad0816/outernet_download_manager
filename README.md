@@ -80,7 +80,19 @@ temporary failures while the segments remain available and fails if the
 server window advances past a missing segment. The output is Matroska
 (`.mkv`).
 
+YouTube watch and Shorts links can be sent from the extension's video button
+or popup, and pasted into the desktop app. YouTube downloads require current
+[yt-dlp](https://github.com/yt-dlp/yt-dlp#installation), Node.js, FFmpeg and
+ffprobe on the app's PATH. This path handles public on-demand videos and
+uses the configured in-progress folder for both media tracks before merging
+and verifying the MKV.
+
 ## Manage downloads
+
+Double-click a completed download to open it with your system's default app.
+Right-click a row or use its **More actions** button for **Show in folder**,
+**Properties** and the actions available for that download. **Remove from history**
+removes the completed entry and keeps the downloaded file on disk.
 
 In **Add download**, select **Multiple links** and paste one URL per line
 (up to 500). Check the file preview, then queue the links. Outernet validates

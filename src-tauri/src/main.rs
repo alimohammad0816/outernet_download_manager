@@ -62,6 +62,37 @@ async fn replace_download_link(
 }
 
 #[tauri::command]
+async fn open_download(
+    store: State<'_, Arc<Store>>,
+    id: String,
+    reveal: bool,
+) -> Result<(), String> {
+    let path = store.completed_path(&id)?;
+    if reveal {
+        if path.is_file() && tauri_plugin_opener::reveal_item_in_dir(&path).is_ok() {
+            return Ok(());
+        }
+        let folder = path
+            .parent()
+            .filter(|folder| folder.is_dir())
+            .ok_or("The download folder is unavailable.")?;
+        tauri_plugin_opener::open_path(folder, None::<&str>)
+            .map_err(|error| format!("Cannot open the download folder: {error}"))
+    } else {
+        if !path.is_file() {
+            return Err("The downloaded file was moved, deleted, or is unavailable.".into());
+        }
+        tauri_plugin_opener::open_path(&path, None::<&str>)
+            .map_err(|error| format!("Cannot open the downloaded file: {error}"))
+    }
+}
+
+#[tauri::command]
+async fn remove_completed_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
+    store.remove_completed(&id)
+}
+
+#[tauri::command]
 async fn retry_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
     store.retry(id)
 }
@@ -289,6 +320,8 @@ fn main() {
             add_download_batch,
             replace_download_link,
             retry_download,
+            open_download,
+            remove_completed_download,
             pause_download,
             stop_recording,
             connect_browser,

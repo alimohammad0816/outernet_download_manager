@@ -25,6 +25,7 @@
   let activeSource;
   let activeUrl;
   let streams = [];
+  let streamsPage = location.href;
   let pending = false;
   let messageTimeout;
 
@@ -41,6 +42,11 @@
   }
 
   function position() {
+    if (streamsPage !== location.href) {
+      streamsPage = location.href;
+      streams = [];
+      choices.replaceChildren();
+    }
     const videos = [...document.querySelectorAll("video")].filter(video => {
       const rect = video.getBoundingClientRect();
       return video.currentSrc && rect.width >= 120 && rect.height >= 70
@@ -54,7 +60,8 @@
       choices.replaceChildren();
     }
     const direct = video ? directSource(video) : null;
-    activeSource = direct ? streams.find(stream => stream.url === direct.url) ?? direct : null;
+    activeSource = streams.find(stream => stream.format === "youtube")
+      ?? (direct ? streams.find(stream => stream.url === direct.url) ?? direct : null);
     if (!video || (!activeSource && !streams.length) || document.fullscreenElement) {
       container.style.display = "none";
       return;
@@ -135,7 +142,9 @@
   window.setInterval(() => {
     position();
     if (++tick % 3 !== 1 || !document.querySelector("video")) return;
+    const page = location.href;
     void api.runtime.sendMessage({ action: "streams" }).then(result => {
+      if (page !== location.href) return;
       streams = result?.streams ?? [];
       position();
     }).catch(() => {});

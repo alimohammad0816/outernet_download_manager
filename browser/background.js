@@ -29,6 +29,20 @@ function webUrl(input) {
   return null;
 }
 
+function youtubeSource(input) {
+  const checked = webUrl(input);
+  if (!checked) return null;
+  const url = new URL(checked);
+  let id;
+  if (url.hostname === "youtu.be") {
+    id = /^\/([\w-]{11})\/?$/.exec(url.pathname)?.[1];
+  } else if (["youtube.com", "www.youtube.com", "m.youtube.com"].includes(url.hostname)) {
+    id = url.pathname === "/watch" ? url.searchParams.get("v") : /^\/shorts\/([\w-]{11})\/?$/.exec(url.pathname)?.[1];
+  }
+  if (!id || !/^[\w-]{11}$/.test(id)) return null;
+  return { url: `https://www.youtube.com/watch?v=${id}`, filename: `youtube-${id}.mkv`, format: "youtube" };
+}
+
 async function requestHost(message) {
   try {
     return await api.runtime.sendNativeMessage(HOST, message);
@@ -38,10 +52,11 @@ async function requestHost(message) {
 }
 
 async function download(tabId, source) {
-  const url = webUrl(source.url);
+  const video = source.format === "youtube" ? youtubeSource(source.url) : null;
+  const url = source.format === "youtube" ? video?.url : webUrl(source.url);
   const { maxHeight } = source.format && source.format !== "file"
     ? await api.storage.local.get("maxHeight") : {};
-  const height = ["hls", "hls_live", "dash"].includes(source.format)
+  const height = ["hls", "hls_live", "dash", "youtube"].includes(source.format)
     ? ([0, ...QUALITY_CAPS].includes(source.maxHeight) ? source.maxHeight : maxHeight)
     : undefined;
   let response;
@@ -60,7 +75,7 @@ async function download(tabId, source) {
       response = { ok: false, error: error.message };
     }
   } else {
-    response = await requestHost({ action: "download", url, filename: source.filename, format: source.format, max_height: height });
+    response = await requestHost({ action: "download", url, filename: video?.filename ?? source.filename, format: source.format, max_height: height });
   }
   if (Number.isInteger(tabId) && tabId >= 0) {
     await api.storage.session.set({ [`result:${tabId}`]: response });
@@ -74,7 +89,8 @@ api.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.srcUrl || info.linkUrl;
   const session = info.menuItemId === SESSION_MENU;
   if (url && !(session && tab?.incognito)) {
-    void download(tab?.id, { url, session, format: streamFormat(url) || "file" });
+    const video = !session && youtubeSource(url);
+    void download(tab?.id, video || { url, session, format: streamFormat(url) || "file" });
   }
 });
 
@@ -145,10 +161,11 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
     const key = `streams:${tabId}`;
     void (networkOperations.get(tabId) ?? Promise.resolve())
       .then(() => api.storage.session.get([key, `result:${tabId}`])).then(data => {
+      const video = youtubeSource(extensionPage ? message.pageUrl : sender.url);
       const items = data[key] ?? [];
       const seen = new Set();
       respond({
-        streams: items.filter(item => {
+        streams: video ? [video] : items.filter(item => {
           if ((!extensionPage && item.frameId !== sender.frameId) || seen.has(item.url)) return false;
           seen.add(item.url);
           return true;

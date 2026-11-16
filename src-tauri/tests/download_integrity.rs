@@ -629,6 +629,53 @@ fn reuses_only_verified_ranges_after_restart() {
 }
 
 #[test]
+fn only_completed_downloads_can_be_opened_or_removed_from_history() {
+    let (_root, _destination, _, settings, store) = setup(None);
+    let (url, server) = serve(Response::Complete(1024, 11));
+    store
+        .add(url, "complete.bin".into(), String::new())
+        .unwrap();
+    let id = job(&store).id;
+    assert!(store.completed_path(&id).is_err());
+    assert!(store.remove_completed(&id).is_err());
+    store.process_next().unwrap();
+    server
+        .join()
+        .unwrap()
+        .expect("download request reached the server");
+    let path = store.completed_path(&id).unwrap();
+    assert_eq!(path, settings.destination_folder.join("complete.bin"));
+    assert_eq!(std::fs::read(&path).unwrap(), vec![11; 1024]);
+    store.remove_completed(&id).unwrap();
+    assert!(store.snapshot().unwrap().jobs.is_empty());
+    assert!(path.exists());
+}
+
+#[test]
+fn youtube_watch_and_short_links_queue_as_media() {
+    let (_root, _destination, _, _, store) = setup(None);
+    for url in [
+        "https://www.youtube.com/watch?v=BaW_jenozKc&list=ignore",
+        "https://youtu.be/BaW_jenozKc",
+        "https://m.youtube.com/shorts/BaW_jenozKc",
+    ] {
+        let name = format!("video-{}", store.snapshot().unwrap().jobs.len());
+        store.add(url.into(), name.clone(), String::new()).unwrap();
+        let queued = job(&store);
+        assert!(queued.format == media::Format::Youtube);
+        assert_eq!(queued.filename, format!("{name}.mkv"));
+    }
+    store
+        .add(
+            "https://www.youtube.com.example.test/watch?v=BaW_jenozKc".into(),
+            "ordinary.bin".into(),
+            String::new(),
+        )
+        .unwrap();
+    assert!(job(&store).format == media::Format::File);
+}
+
+#[test]
 fn batch_is_atomic_and_reserves_distinct_filenames() {
     let (_root, _destination, _, _, store) = setup(None);
     let first = "https://example.test/first/file.zip".to_string();

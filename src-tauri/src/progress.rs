@@ -75,6 +75,10 @@ impl TransferControl {
         *current = total;
     }
 
+    pub fn speed_limit_bytes(&self) -> Option<u64> {
+        self.bytes_per_second
+    }
+
     pub fn chunk_bytes(&self, maximum: usize) -> usize {
         self.bytes_per_second
             .map_or(maximum, |rate| maximum.min((rate / 8).max(1) as usize))

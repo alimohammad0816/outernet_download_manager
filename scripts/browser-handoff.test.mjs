@@ -211,6 +211,16 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
     await send({ action: "download", tabId: 8, ...frame.streams[0], format: "hls_live", maxHeight: 480 });
     assert.equal(native.at(-1).format, "hls_live");
     assert.equal(native.at(-1).max_height, 480);
+    const youtube = await send({ action: "streams", tabId: 8, pageUrl: "https://www.youtube.com/watch?v=BaW_jenozKc&list=ignored" });
+    assert.deepEqual(youtube.streams, [{
+      url: "https://www.youtube.com/watch?v=BaW_jenozKc",
+      filename: "youtube-BaW_jenozKc.mkv",
+      format: "youtube",
+    }]);
+    await send({ action: "download", tabId: 8, ...youtube.streams[0], maxHeight: 1080 });
+    assert.equal(native.at(-1).format, "youtube");
+    assert.equal(native.at(-1).max_height, 1080);
+
   } finally {
     delete globalThis.chrome;
   }

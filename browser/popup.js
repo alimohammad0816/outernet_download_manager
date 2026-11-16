@@ -31,7 +31,7 @@ try {
   const [tab] = await api.tabs.query({ active: true, currentWindow: true });
   const [connection, data] = await Promise.all([
     api.runtime.sendMessage({ action: "ping" }),
-    api.runtime.sendMessage({ action: "streams", tabId: tab.id }),
+    api.runtime.sendMessage({ action: "streams", tabId: tab.id, pageUrl: tab.url }),
   ]);
   const error = connection.ok ? data?.result?.error : connection.error;
   showStatus(error || (data?.result?.pending ? "Receiving through your browser…" : "Desktop app connected"),
@@ -44,7 +44,8 @@ try {
     const url = new URL(stream.url);
     const name = url.pathname.split("/").pop() || url.hostname;
     const format = stream.format === "file" ? "video file" : stream.format.toUpperCase();
-    const actions = [[`Download ${format} · ${name}`, stream.format]];
+    const label = stream.format === "youtube" ? "Download YouTube video" : `Download ${format} · ${name}`;
+    const actions = [[label, stream.format]];
     if (stream.format === "hls") actions.push([`Record live · ${name}`, "hls_live"]);
     for (const [label, format] of actions) {
       const button = document.createElement("button");
