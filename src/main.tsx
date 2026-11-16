@@ -785,7 +785,11 @@ function WindowControls({ onError }: { onError: (error: string) => void }) {
       <button className="icon-button window-close" title="Close" aria-label="Close window" onClick={() => operate(() => appWindow.close())}><X size={15} /></button>
     </div>
     {resizeDirections.map(direction => <span key={direction} aria-hidden="true" className={`resize-grip resize-${direction.toLowerCase()}`}
-      onPointerDown={event => { if (event.button === 0) operate(() => appWindow.startResizeDragging(direction)); }} />)}
+      onMouseDown={event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        operate(() => appWindow.startResizeDragging(direction));
+      }} />)}
   </>;
 }
 
@@ -993,6 +997,7 @@ function App() {
     <div className="layout">
       <header className="app-header" onMouseDown={event => {
         if (event.button === 0 && event.detail === 1 && event.target === event.currentTarget) {
+          event.preventDefault();
           void getCurrentWindow().startDragging().catch(error => setActionError(describe(error)));
         }
       }}>
