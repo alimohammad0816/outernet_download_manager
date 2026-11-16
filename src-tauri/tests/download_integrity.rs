@@ -1,5 +1,7 @@
 #[path = "../src/media.rs"]
 mod media;
+#[path = "../src/network.rs"]
+mod network;
 #[path = "../src/progress.rs"]
 mod progress;
 #[path = "../src/ranges.rs"]
@@ -762,6 +764,200 @@ fn replacing_a_link_reuses_checkpoint_with_publisher_hash() {
         .collect::<Vec<_>>();
     assert_eq!(gets.len(), 1);
     assert!(gets[0].starts_with("GET /file.zip?token=fresh "));
+}
+
+#[test]
+fn legacy_downloads_migrate_to_the_main_queue() {
+    let (_root, _destination, database, settings, store) = setup(None);
+    store
+        .add(
+            "https://example.test/file.bin".into(),
+            "legacy.bin".into(),
+            String::new(),
+        )
+        .unwrap();
+    let id = job(&store).id;
+    drop(store);
+    let database_cleanup = rusqlite::Connection::open(&database).unwrap();
+    let snapshot: String = database_cleanup
+        .query_row("SELECT snapshot FROM app_state WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    snapshot.as_object_mut().unwrap().remove("queues");
+    snapshot["settings"]["downloadSlots"] = 3.into();
+    let legacy_job = snapshot["jobs"][0].as_object_mut().unwrap();
+    legacy_job.remove("queueId");
+    legacy_job.remove("addedAt");
+    database_cleanup
+        .execute(
+            "UPDATE app_state SET snapshot = ?1 WHERE id = 1",
+            [snapshot.to_string()],
+        )
+        .unwrap();
+    drop(database_cleanup);
+    let migrated = Store::open(&database, settings)
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(migrated.queues.len(), 1);
+    assert_eq!(migrated.queues[0].id, store::DEFAULT_QUEUE);
+    assert_eq!(migrated.queues[0].slots, 3);
+    assert!(migrated.queues[0].running);
+    assert_eq!(migrated.jobs[0].id, id);
+    assert_eq!(migrated.jobs[0].queue_id, store::DEFAULT_QUEUE);
+    assert!(migrated.jobs[0].added_at.is_none());
+}
+
+#[test]
+fn queues_limit_workers_independently_and_can_stop_and_resume() {
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
+    let (_root, _destination, database, settings, store) = setup(None);
+    let store = Arc::new(store);
+    let other = store.save_queue(None, "Wi-Fi".into(), 2, None).unwrap();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let response_gate = Arc::clone(&gate);
+    let (request, requests) = mpsc::channel();
+    let server = Fixture::start(move |mut stream, raw| {
+        if raw.starts_with("HEAD ") {
+            let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        let path = raw.split_whitespace().nth(1).unwrap().to_owned();
+        let _ = request.send(path);
+        let (open, ready) = &*response_gate;
+        let _guard = ready
+            .wait_timeout_while(open.lock().unwrap(), Duration::from_secs(5), |open| !*open)
+            .unwrap();
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata");
+    });
+    for name in ["main-1", "main-2"] {
+        store
+            .add(server.url(name), name.into(), String::new())
+            .unwrap();
+    }
+    for name in ["wifi-1", "wifi-2", "wifi-3"] {
+        store
+            .add_to_queue(server.url(name), name.into(), String::new(), &other)
+            .unwrap();
+    }
+    let pending = store
+        .snapshot()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.filename == "wifi-3")
+        .unwrap();
+    store
+        .move_download(&pending.id, store::DEFAULT_QUEUE)
+        .unwrap();
+    assert_eq!(job(&store).queue_id, store::DEFAULT_QUEUE);
+    store.move_download(&pending.id, &other).unwrap();
+    assert!(store.start_next(|_| {}).unwrap());
+    assert_eq!(
+        requests.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "/main-1"
+    );
+    assert!(!store.start_next(|_| {}).unwrap());
+    store.set_queue_running(&other, true).unwrap();
+    assert!(store.start_next(|_| {}).unwrap());
+    assert!(store.start_next(|_| {}).unwrap());
+    let mut active = [
+        requests.recv_timeout(Duration::from_secs(5)).unwrap(),
+        requests.recv_timeout(Duration::from_secs(5)).unwrap(),
+    ];
+    active.sort();
+    assert_eq!(active, ["/wifi-1", "/wifi-2"]);
+    assert!(!store.start_next(|_| {}).unwrap());
+    store.set_queue_running(&other, false).unwrap();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let state = store.snapshot().unwrap();
+        if state
+            .jobs
+            .iter()
+            .all(|job| !matches!(job.status, Status::Downloading | Status::Verifying))
+        {
+            assert!(state
+                .jobs
+                .iter()
+                .filter(|job| job.queue_id == other)
+                .all(|job| job.status == Status::Queued));
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "workers did not stop");
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(store.process_next().unwrap());
+    assert!(!store.process_next().unwrap());
+    let reopened = Store::open(&database, settings).unwrap();
+    assert!(!reopened.process_next().unwrap());
+    reopened.set_queue_running(&other, true).unwrap();
+    for _ in 0..3 {
+        assert!(reopened.process_next().unwrap());
+    }
+    let finished = reopened.snapshot().unwrap();
+    assert!(finished
+        .jobs
+        .iter()
+        .all(|job| job.status == Status::Complete && job.added_at.is_some()));
+    assert_eq!(
+        finished
+            .queues
+            .iter()
+            .find(|queue| queue.id == other)
+            .unwrap()
+            .slots,
+        2
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bound_http_client_uses_the_selected_source_address() {
+    assert!(progress::TransferControl::new(None).binding().is_none());
+    let (peer, connected) = std::sync::mpsc::channel();
+    let server = Fixture::start(move |mut stream, _| {
+        peer.send(stream.peer_addr().unwrap().ip()).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata")
+            .unwrap();
+    });
+    let address: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+    let control = progress::TransferControl::with_binding(
+        None,
+        Some(network::Binding {
+            name: "lo".into(),
+            address,
+        }),
+    );
+    let response = transfer::http_client(true, &control)
+        .unwrap()
+        .get(server.url("fixture"))
+        .send()
+        .unwrap();
+    assert_eq!(&response.bytes().unwrap()[..], b"data");
+    assert_eq!(
+        connected.recv_timeout(Duration::from_secs(5)).unwrap(),
+        address
+    );
+    let unavailable = progress::TransferControl::with_binding(
+        None,
+        Some(network::Binding {
+            name: "outernet-missing".into(),
+            address,
+        }),
+    );
+    assert!(transfer::http_client(true, &unavailable)
+        .unwrap()
+        .get(server.url("fixture"))
+        .send()
+        .is_err());
 }
 
 #[test]

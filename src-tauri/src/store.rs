@@ -1,5 +1,6 @@
 use crate::{
     media::{self, Format},
+    network,
     progress::{TransferControl, TransferProgress, MAX_SPEED_KIB},
     ranges, transfer,
 };
@@ -61,6 +62,10 @@ pub struct Job {
     pub id: String,
     pub url: String,
     pub filename: String,
+    #[serde(default = "default_queue_id")]
+    pub queue_id: String,
+    #[serde(default)]
+    pub added_at: Option<u64>,
     pub settings: Settings,
     #[serde(default)]
     pub format: Format,
@@ -97,7 +102,7 @@ impl Job {
     fn progress(mut self) -> Self {
         if matches!(
             self.status,
-            Status::Downloading | Status::Pausing | Status::Paused
+            Status::Downloading | Status::Pausing | Status::Paused | Status::Queued
         ) && self.attempt.is_some()
         {
             self.bytes = ranges::completed_bytes(&self.working_dir())
@@ -107,14 +112,46 @@ impl Job {
     }
 }
 
+pub const DEFAULT_QUEUE: &str = "default";
+
+fn default_queue_id() -> String {
+    DEFAULT_QUEUE.into()
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadQueue {
+    pub id: String,
+    pub name: String,
+    pub slots: u8,
+    pub running: bool,
+    pub interface: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub settings: Settings,
     pub jobs: Vec<Job>,
     #[serde(default)]
+    pub queues: Vec<DownloadQueue>,
+    #[serde(default)]
     pub run_after: Option<u64>,
     #[serde(default)]
     pub daily_window: Option<DailyWindow>,
+}
+
+impl Snapshot {
+    fn ensure_default_queue(&mut self) {
+        if self.queues.is_empty() {
+            self.queues.push(DownloadQueue {
+                id: default_queue_id(),
+                name: "Main queue".into(),
+                slots: self.settings.download_slots,
+                running: true,
+                interface: None,
+            });
+        }
+    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -162,6 +199,7 @@ impl Store {
         let initial = Snapshot {
             settings: defaults,
             jobs: Vec::new(),
+            queues: Vec::new(),
             run_after: None,
             daily_window: None,
         };
@@ -187,7 +225,11 @@ impl Store {
             })
             .optional()
             .map_err(db_error)?
-            .map(|json| serde_json::from_str(&json).map_err(db_error))
+            .map(|json| {
+                let mut state: Snapshot = serde_json::from_str(&json).map_err(db_error)?;
+                state.ensure_default_queue();
+                Ok(state)
+            })
             .transpose()
     }
 
@@ -225,7 +267,8 @@ impl Store {
                 row.get(0)
             })
             .map_err(db_error)?;
-        let mut state = serde_json::from_str(&json).map_err(db_error)?;
+        let mut state: Snapshot = serde_json::from_str(&json).map_err(db_error)?;
+        state.ensure_default_queue();
         let result = apply(&mut state)?;
         save(&transaction, &state)?;
         transaction.commit().map_err(db_error)?;
@@ -248,6 +291,13 @@ impl Store {
 
         let destination_folder = transfer::normalize_folder(settings.destination_folder)?;
         self.update(|state| {
+            if let Some(queue) = state
+                .queues
+                .iter_mut()
+                .find(|queue| queue.id == DEFAULT_QUEUE)
+            {
+                queue.slots = settings.download_slots;
+            }
             state.settings = Settings {
                 working_folder,
                 destination_folder,
@@ -258,7 +308,17 @@ impl Store {
     }
 
     pub fn add(&self, url: String, filename: String, sha256: String) -> Result<(), String> {
-        self.add_job(url, filename, sha256, None)
+        self.add_to_queue(url, filename, sha256, DEFAULT_QUEUE)
+    }
+
+    pub fn add_to_queue(
+        &self,
+        url: String,
+        filename: String,
+        sha256: String,
+        queue_id: &str,
+    ) -> Result<(), String> {
+        self.add_job(url, filename, sha256, None, queue_id)
     }
 
     pub fn add_from_browser(
@@ -268,7 +328,13 @@ impl Store {
         format: Option<Format>,
         max_height: Option<u32>,
     ) -> Result<(), String> {
-        self.add_job(url, filename, String::new(), Some((format, max_height)))
+        self.add_job(
+            url,
+            filename,
+            String::new(),
+            Some((format, max_height)),
+            DEFAULT_QUEUE,
+        )
     }
 
     fn add_job(
@@ -277,27 +343,39 @@ impl Store {
         filename: String,
         sha256: String,
         browser_source: Option<(Option<Format>, Option<u32>)>,
+        queue_id: &str,
     ) -> Result<(), String> {
         self.update(|state| {
-            let job = Self::new_job(
+            let mut job = Self::new_job(
                 state.settings.clone(),
                 url,
                 filename,
                 sha256,
                 browser_source,
             )?;
+            job.queue_id = queue_id.to_owned();
             Self::enqueue(state, job, browser_source.is_some())
         })
     }
 
     pub fn add_batch(&self, links: Vec<(String, String)>) -> Result<(), String> {
+        self.add_batch_to_queue(links, DEFAULT_QUEUE)
+    }
+
+    pub fn add_batch_to_queue(
+        &self,
+        links: Vec<(String, String)>,
+        queue_id: &str,
+    ) -> Result<(), String> {
         if !(1..=500).contains(&links.len()) {
             return Err("Enter between 1 and 500 links.".into());
         }
         self.update(|state| {
             for (index, (url, filename)) in links.into_iter().enumerate() {
-                let job = Self::new_job(state.settings.clone(), url, filename, String::new(), None)
-                    .map_err(|error| format!("Link {}: {error}", index + 1))?;
+                let mut job =
+                    Self::new_job(state.settings.clone(), url, filename, String::new(), None)
+                        .map_err(|error| format!("Link {}: {error}", index + 1))?;
+                job.queue_id = queue_id.to_owned();
                 Self::enqueue(state, job, true)?;
             }
             Ok(())
@@ -305,6 +383,9 @@ impl Store {
     }
 
     fn enqueue(state: &mut Snapshot, mut job: Job, rename: bool) -> Result<(), String> {
+        if !state.queues.iter().any(|queue| queue.id == job.queue_id) {
+            return Err("Download queue not found.".into());
+        }
         job.filename = available_name(state, &job.settings, job.filename, rename)?;
         state.jobs.insert(0, job);
         Ok(())
@@ -348,6 +429,8 @@ impl Store {
             id: Uuid::new_v4().to_string(),
             url: url.into(),
             filename,
+            queue_id: default_queue_id(),
+            added_at: Some(unix_millis()),
             settings,
             format,
             max_height,
@@ -359,6 +442,103 @@ impl Store {
             bytes: 0,
             transfer: None,
             attempt: None,
+        })
+    }
+
+    pub fn save_queue(
+        &self,
+        id: Option<String>,
+        name: String,
+        slots: u8,
+        interface: Option<String>,
+    ) -> Result<String, String> {
+        let name = name.trim().to_owned();
+        if name.is_empty() || name.chars().count() > 60 || !(1..=8).contains(&slots) {
+            return Err(
+                "Enter a queue name and choose between one and eight simultaneous downloads."
+                    .into(),
+            );
+        }
+        if let Some(ref interface) = interface {
+            network::bind(interface)?;
+        }
+        self.update(|state| {
+            if let Some(ref id) = id {
+                let queue = state
+                    .queues
+                    .iter_mut()
+                    .find(|queue| &queue.id == id)
+                    .ok_or("Download queue not found.")?;
+                queue.name = name;
+                queue.slots = slots;
+                queue.interface = interface;
+                if id == DEFAULT_QUEUE {
+                    state.settings.download_slots = slots;
+                }
+                return Ok(id.clone());
+            }
+            if state.queues.len() >= 24 {
+                return Err("You can create up to 24 download queues.".into());
+            }
+            let id = Uuid::new_v4().to_string();
+            state.queues.push(DownloadQueue {
+                id: id.clone(),
+                name,
+                slots,
+                running: false,
+                interface,
+            });
+            Ok(id)
+        })
+    }
+
+    pub fn set_queue_running(&self, id: &str, running: bool) -> Result<(), String> {
+        let workers = self.workers.lock().map_err(db_error)?;
+        let interrupted = self.update(|state| {
+            let queue = state
+                .queues
+                .iter_mut()
+                .find(|queue| queue.id == id)
+                .ok_or("Download queue not found.")?;
+            queue.running = running;
+            Ok(state
+                .jobs
+                .iter()
+                .filter(|job| !running && job.queue_id == id && job.status == Status::Downloading)
+                .map(|job| (job.id.clone(), job.format))
+                .collect::<Vec<_>>())
+        })?;
+        for (job, format) in interrupted {
+            if let Some(control) = workers.get(&job) {
+                if format == Format::HlsLive {
+                    control.finish_recording();
+                } else {
+                    control.hold_for_queue();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn move_download(&self, id: &str, queue_id: &str) -> Result<(), String> {
+        let _workers = self.workers.lock().map_err(db_error)?;
+        self.update(|state| {
+            if !state.queues.iter().any(|queue| queue.id == queue_id) {
+                return Err("Download queue not found.".into());
+            }
+            let job = state
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or("Download not found.")?;
+            if !matches!(
+                job.status,
+                Status::Queued | Status::Paused | Status::Failed | Status::Complete
+            ) {
+                return Err("Stop the transfer before moving it to another queue.".into());
+            }
+            job.queue_id = queue_id.to_owned();
+            Ok(())
         })
     }
 
@@ -451,6 +631,8 @@ impl Store {
                     url,
                     filename,
                     settings,
+                    queue_id: default_queue_id(),
+                    added_at: Some(unix_millis()),
                     format: Format::File,
                     max_height: None,
                     expected_sha256: None,
@@ -614,8 +796,11 @@ impl Store {
     fn claim_next(&self) -> Result<Option<ClaimedDownload>, String> {
         let mut workers = self.workers.lock().map_err(db_error)?;
         let snapshot = self.read()?.ok_or("Missing application state.")?;
-        if workers.len() >= usize::from(snapshot.settings.download_slots) {
-            return Ok(None);
+        let mut occupied = HashMap::<&str, usize>::new();
+        for job in &snapshot.jobs {
+            if workers.contains_key(&job.id) {
+                *occupied.entry(&job.queue_id).or_default() += 1;
+            }
         }
         let queue_due = snapshot.run_after.is_none_or(|time| time <= unix_millis())
             && snapshot.daily_window.is_none_or(|window| {
@@ -624,17 +809,45 @@ impl Store {
             });
         let next = snapshot
             .jobs
-            .into_iter()
+            .iter()
             .enumerate()
             .filter(|(_, job)| {
                 !workers.contains_key(&job.id)
-                    && (job.status == Status::Ready || (queue_due && job.status == Status::Queued))
+                    && snapshot.queues.iter().any(|queue| {
+                        queue.id == job.queue_id
+                            && occupied.get(queue.id.as_str()).copied().unwrap_or(0)
+                                < usize::from(queue.slots)
+                            && (job.status == Status::Ready
+                                || (queue.running && queue_due && job.status == Status::Queued))
+                    })
             })
             .max_by_key(|(index, job)| (job.status == Status::Ready, job.priority, *index));
-        let Some((_, mut job)) = next else {
+        let Some((_, job)) = next else {
             return Ok(None);
         };
-        let control = Arc::new(TransferControl::new(snapshot.settings.speed_limit_kib));
+        let mut job = job.clone();
+        let queue = snapshot
+            .queues
+            .iter()
+            .find(|queue| queue.id == job.queue_id)
+            .expect("queue was selected");
+        let binding = if job.status == Status::Queued {
+            match queue.interface.as_deref().map(network::bind).transpose() {
+                Ok(binding) => binding,
+                Err(error) => {
+                    job.status = Status::Failed;
+                    job.error = Some(error);
+                    self.save_job(&job)?;
+                    return Ok(None);
+                }
+            }
+        } else {
+            None
+        };
+        let control = Arc::new(TransferControl::with_binding(
+            snapshot.settings.speed_limit_kib,
+            binding,
+        ));
         if job.status == Status::Queued {
             job.status = Status::Downloading;
             job.attempt
@@ -696,7 +909,9 @@ impl Store {
         let mut workers = self.workers.lock().map_err(db_error)?;
         workers.remove(&job.id);
         if let Err(error) = outcome {
-            job.status = if control.is_paused() {
+            job.status = if control.is_held_for_queue() {
+                Status::Queued
+            } else if control.is_paused() {
                 Status::Paused
             } else {
                 Status::Failed

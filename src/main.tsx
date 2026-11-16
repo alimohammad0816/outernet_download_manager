@@ -1,6 +1,7 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, HardDrive, ListFilter, Layers, Link, MoreHorizontal, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
+import { ArrowDown, ArrowDownToLine, ArrowUp, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, ListFilter, Layers, Link, Minus, MoreHorizontal, Pause, Play, Plus, RefreshCw, Settings2, Square, SquareDashed, X } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -21,6 +22,8 @@ type Job = {
   id: string;
   url: string;
   filename: string;
+  queueId: string;
+  addedAt: number | null;
   format?: "file" | "hls" | "hls_live" | "dash" | "youtube";
   status: Status;
   priority: Priority;
@@ -31,7 +34,10 @@ type Job = {
   bytes: number;
   transfer?: TransferProgress;
 };
-type Snapshot = { settings: Settings; jobs: Job[]; run_after: number | null; daily_window: DailyWindow | null };
+type DownloadQueue = { id: string; name: string; slots: number; running: boolean; interface: string | null };
+type NetworkInterface = { name: string; address: string };
+type Snapshot = { settings: Settings; jobs: Job[]; queues: DownloadQueue[]; run_after: number | null; daily_window: DailyWindow | null };
+type SortKey = "date" | "name" | "size" | "status" | "priority";
 type Filter = "all" | "complete" | "failed";
 const categories = {
   Video: /\.(mp4|m4v|mkv|mov|avi|webm|ts|m3u8|mpd)$/i,
@@ -147,7 +153,10 @@ function FormActions({ busy, onClose, label }: { busy: boolean; onClose: () => v
   </div>;
 }
 
-function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => Promise<void> }) {
+function AddDownload({ queues, initialQueue, onClose, onSave }: {
+  queues: DownloadQueue[]; initialQueue: string; onClose: () => void; onSave: () => Promise<void>;
+}) {
+  const [queueId, setQueueId] = useState(initialQueue);
   const [url, setUrl] = useState("");
   const [batch, setBatch] = useState(false);
   const [links, setLinks] = useState("");
@@ -184,9 +193,9 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
     setError("");
     try {
       if (batch) {
-        await invoke("add_download_batch", { links: entries.map(entry => [entry.url, entry.filename]) });
+        await invoke("add_download_batch", { links: entries.map(entry => [entry.url, entry.filename]), queueId });
       } else {
-        await invoke("add_download", { url, filename: filename ?? suggestedName(url), sha256 });
+        await invoke("add_download", { url, filename: filename ?? suggestedName(url), sha256, queueId });
       }
       await onSave();
       onClose();
@@ -232,6 +241,10 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
               <label>SHA-256 <span>Optional</span><input spellCheck={false} autoComplete="off" value={sha256} onChange={event => setSha256(event.target.value)} placeholder="Publisher checksum" /></label>
             </div>
           )}
+          <div className="queue-field"><span>Download queue</span>
+            <ChoicePicker value={queueId} onChange={setQueueId} label="Download queue"
+              options={queues.map(queue => [queue.id, queue.name])} />
+          </div>
           {error && <p className="error" role="alert">{error}</p>}
         </div>
         <div className="workspace-footer">
@@ -384,16 +397,10 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
           </section>
           <section className="settings-section">
             <h3>Transfers</h3>
-            <div className="settings-columns">
-              <label>Speed limit <span>KiB/s per download</span>
-                <input type="number" min="1" max="1048576" step="1" inputMode="numeric" placeholder="Unlimited"
-                  value={limit} onChange={event => setLimit(event.target.value)} />
-              </label>
-              <label>Simultaneous downloads
-                <input type="number" min="1" max="8" step="1" required value={paths.downloadSlots}
-                  onChange={event => setPaths({ ...paths, downloadSlots: event.target.valueAsNumber })} />
-              </label>
-            </div>
+            <label>Speed limit <span>KiB/s per download</span>
+              <input type="number" min="1" max="1048576" step="1" inputMode="numeric" placeholder="Unlimited"
+                value={limit} onChange={event => setLimit(event.target.value)} />
+            </label>
           </section>
           <section className="settings-section">
             <h3>Desktop</h3>
@@ -657,11 +664,117 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
   );
 }
 
-type DownloadAction = "open" | "reveal" | "properties" | "forget" | "pause" | "retry" | "replace" | "stop";
+function QueueForm({ queue, onClose, onSave }: {
+  queue: DownloadQueue | null; onClose: () => void; onSave: (id: string) => Promise<void>;
+}) {
+  const [name, setName] = useState(queue?.name ?? "");
+  const [slots, setSlots] = useState(queue?.slots ?? 1);
+  const [device, setDevice] = useState(queue?.interface ?? "");
+  const [devices, setDevices] = useState<NetworkInterface[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void invoke<NetworkInterface[]>("list_network_interfaces").then(setDevices).catch(failure => setError(describe(failure)));
+  }, []);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const id = await invoke<string>("save_download_queue", { id: queue?.id ?? null, name, slots, interface: device || null });
+      await onSave(id);
+      onClose();
+    } catch (failure) {
+      setError(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const options: Array<[string, string]> = [["", "System default"]];
+  for (const item of devices) options.push([item.name, `${item.name} · ${item.address}`]);
+  if (device && !devices.some(item => item.name === device)) options.push([device, `${device} · unavailable`]);
+  return <Modal title={queue ? "Queue settings" : "New download queue"} description="Set the download limit and network interface for this queue."
+    mark={<Layers size={20} />} className="workspace-dialog" onClose={onClose}>
+    <form className="workspace-form" onSubmit={save}>
+      <div className="workspace-body single-fields">
+        <label>Queue name<input data-initial-focus value={name} maxLength={60} onChange={event => setName(event.target.value)} required /></label>
+        <label>Simultaneous downloads<input type="number" value={slots} min={1} max={8} required
+          onChange={event => setSlots(event.target.valueAsNumber)} /></label>
+        <div className="queue-field"><span>Network interface</span>
+          <ChoicePicker value={device} onChange={setDevice} label="Network interface" options={options} />
+        </div>
+        {error && <p className="error" role="alert">{error}</p>}
+      </div>
+      <FormActions busy={busy} onClose={onClose} label={queue ? "Save queue" : "Create queue"} />
+    </form>
+  </Modal>;
+}
+
+function MoveDownload({ job, queues, onClose, onSave }: {
+  job: Job; queues: DownloadQueue[]; onClose: () => void; onSave: () => Promise<void>;
+}) {
+  const [target, setTarget] = useState(queues.find(queue => queue.id !== job.queueId)?.id ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await invoke("move_download_to_queue", { id: job.id, queueId: target });
+      await onSave();
+      onClose();
+    } catch (failure) {
+      setError(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return <Modal title="Move to queue" description={job.filename} className="workspace-dialog" mark={<Layers size={20} />} onClose={onClose}>
+    <form className="workspace-form" onSubmit={save}>
+      <div className="workspace-body">
+        <ChoicePicker label="Destination queue" value={target} onChange={setTarget}
+          options={queues.filter(queue => queue.id !== job.queueId).map(queue => [queue.id, queue.name])} />
+        {error && <p className="error" role="alert">{error}</p>}
+      </div>
+      <FormActions busy={busy} onClose={onClose} label="Move download" />
+    </form>
+  </Modal>;
+}
+
+const resizeDirections = ["North", "South", "East", "West", "NorthEast", "NorthWest", "SouthEast", "SouthWest"] as const;
+
+function WindowControls({ onError }: { onError: (error: string) => void }) {
+  const appWindow = getCurrentWindow();
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    const update = () => void appWindow.isMaximized().then(setMaximized).catch(() => {});
+    update();
+    const session = appWindow.onResized(update).catch(() => undefined);
+    return () => { void session.then(unlisten => unlisten?.()); };
+  }, [appWindow.label]);
+  function operate(action: () => Promise<void>) {
+    void action().catch(error => onError(describe(error)));
+  }
+  return <>
+    <div className="window-controls">
+      <button className="icon-button" title="Minimize" aria-label="Minimize" onClick={() => operate(() => appWindow.minimize())}><Minus size={15} /></button>
+      <button className="icon-button" title={maximized ? "Restore" : "Maximize"} aria-label={maximized ? "Restore" : "Maximize"}
+        onClick={() => operate(() => appWindow.toggleMaximize())}>{maximized ? <SquareDashed size={13} /> : <Square size={12} />}</button>
+      <button className="icon-button window-close" title="Close" aria-label="Close window" onClick={() => operate(() => appWindow.close())}><X size={15} /></button>
+    </div>
+    {!maximized && resizeDirections.map(direction => <span key={direction} aria-hidden="true" className={`resize-grip resize-${direction.toLowerCase()}`}
+      onPointerDown={event => { if (event.button === 0) operate(() => appWindow.startResizeDragging(direction)); }} />)}
+  </>;
+}
+
+type DownloadAction = "open" | "reveal" | "properties" | "forget" | "move" | "pause" | "retry" | "replace" | "stop";
 type MenuAnchor = { id: string; x: number; y: number; previous: HTMLElement };
 
-function DownloadMenu({ job, anchor, onClose, onAction }: {
-  job: Job; anchor: MenuAnchor; onClose: () => void; onAction: (action: DownloadAction) => void;
+function DownloadMenu({ job, anchor, canMove, onClose, onAction }: {
+  job: Job; canMove: boolean; anchor: MenuAnchor; onClose: () => void; onAction: (action: DownloadAction) => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -693,6 +806,7 @@ function DownloadMenu({ job, anchor, onClose, onAction }: {
     options.push(["retry", job.status === "paused" ? "Resume" : "Retry"]);
     if (!job.sha256) options.push(["replace", "Replace link"]);
   }
+  if (canMove && ["queued", "paused", "failed", "complete"].includes(job.status)) options.push(["move", "Move to queue"]);
   options.push(["properties", "Properties"]);
   if (job.status === "complete") options.push(["forget", "Remove from history"]);
 
@@ -723,6 +837,7 @@ function DownloadProperties({ job, onClose }: { job: Job; onClose: () => void })
       <dl className="download-properties">
         <div><dt>Status</dt><dd>{statusLabel[job.status]}</dd></div>
         <div><dt>Size</dt><dd>{displaySize(job.bytes)}</dd></div>
+        {job.addedAt != null && <div><dt>Date added</dt><dd>{new Date(job.addedAt).toLocaleString()}</dd></div>}
         <div><dt>Destination folder</dt><dd>{job.settings.destinationFolder}</dd></div>
         <div><dt>Source URL</dt><dd>{job.url}</dd></div>
         {job.sha256 && <div><dt>SHA-256</dt><dd className="checksum">{job.sha256}</dd></div>}
@@ -738,6 +853,11 @@ function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [category, setCategory] = useState("");
   const [replacement, setReplacement] = useState<Job | null>(null);
+  const [queueId, setQueueId] = useState("default");
+  const [queueForm, setQueueForm] = useState<DownloadQueue | "new" | null>(null);
+  const [moving, setMoving] = useState<Job | null>(null);
+  const [sort, setSort] = useState<SortKey>("date");
+  const [ascending, setAscending] = useState(false);
   const [propertiesId, setPropertiesId] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
@@ -800,6 +920,7 @@ function App() {
     menu?.previous.focus();
     if (action === "properties") setPropertiesId(job.id);
     else if (action === "replace") setReplacement(job);
+    else if (action === "move") setMoving(job);
     else if (action === "open" || action === "reveal") await openFile(job.id, action === "reveal");
     else if (action === "forget") {
       setActionError("");
@@ -815,36 +936,73 @@ function App() {
   }
 
   const jobs = state?.jobs ?? [];
+  const queues = state?.queues ?? [];
+  const queue = queues.find(item => item.id === queueId) ?? queues[0];
+  const queueJobs = jobs.filter(job => job.queueId === queue?.id);
   const menuJob = menu ? jobs.find(job => job.id === menu.id) : null;
   const properties = jobs.find(job => job.id === propertiesId);
-  const activeJobs = jobs.filter(job => job.status === "downloading");
+  const activeJobs = queueJobs.filter(job => job.status === "downloading");
   const transferRate = activeJobs.reduce((total, job) => total + (job.transfer?.bytesPerSecond ?? 0), 0);
-  const queued = jobs.filter(job => job.status === "queued").length;
-  const visible = jobs.filter(job => (filter === "all" || job.status === filter) && (!category || fileCategory(job.filename) === category));
+  const queued = queueJobs.filter(job => job.status === "queued").length;
+  const visible = queueJobs.filter(job => (filter === "all" || job.status === filter) && (!category || fileCategory(job.filename) === category));
+  const priorities = { low: 0, normal: 1, high: 2 };
+  const positions = new Map(queueJobs.map((job, index) => [job.id, index]));
+  visible.sort((left, right) => {
+    const order = sort === "name" ? left.filename.localeCompare(right.filename, undefined, { numeric: true, sensitivity: "base" })
+      : sort === "size" ? left.bytes - right.bytes
+      : sort === "status" ? statusLabel[left.status].localeCompare(statusLabel[right.status])
+      : sort === "priority" ? priorities[left.priority] - priorities[right.priority]
+      : ((left.addedAt ?? 0) - (right.addedAt ?? 0) || (positions.get(right.id) ?? 0) - (positions.get(left.id) ?? 0));
+    return order * (ascending ? 1 : -1);
+  });
+
+  async function toggleQueue() {
+    if (!queue) return;
+    setActionError("");
+    try {
+      await invoke("set_download_queue_running", { id: queue.id, running: !queue.running });
+      await refresh();
+    } catch (failure) {
+      setActionError(describe(failure));
+    }
+  }
   const heading = filters.find(item => item.key === filter)?.label;
   const hostname = (url: string) => new URL(url).hostname;
   const closePanel = () => setPanel(null);
 
   return (
     <div className="layout">
-      <header className="app-header">
+      <header className="app-header" data-tauri-drag-region>
         <div className="brand"><img className="brand-icon" src="/outernet.svg" width={28} height={28} alt="" /> Outernet</div>
         <div className="app-actions">
           <button className="icon-button" title="Queue schedule" aria-label="Queue schedule" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /></button>
           <button className="icon-button" title="Browser integration" aria-label="Browser integration" onClick={() => setPanel("browser")}><Globe size={17} /></button>
           <button className="icon-button" title="Settings" aria-label="Settings" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /></button>
+          <WindowControls onError={setActionError} />
         </div>
       </header>
       <main>
         <header className="queue-header">
-          <div>
-            {state && <p className={activeJobs.length ? "queue-state receiving" : "queue-state"}>
-              <span />{activeJobs.length ? "Transfers in progress" : queued ? "Queue waiting" : "Queue idle"}
-            </p>}
-            <h1>Downloads</h1>
+          <h1 className="sr-only">Downloads</h1>
+          <div className="queue-selector">
+            {queue && <ChoicePicker value={queue.id} onChange={setQueueId} label="Download queue" icon={<Layers size={16} />}
+              options={queues.map(item => [item.id, item.name])} />}
+            <button type="button" className="icon-button" title="New queue" aria-label="New queue" disabled={!queue} onClick={() => setQueueForm("new")}><Plus size={17} /></button>
+            {queue && <button type="button" className="icon-button" title="Queue settings" aria-label="Queue settings" onClick={() => setQueueForm(queue)}><Settings2 size={16} /></button>}
           </div>
-          <button className="button queue-submit" disabled={!state} onClick={() => setPanel("add")}><Plus size={17} /> Add download</button>
+          <div className="queue-actions">
+            {queue && <button type="button" className="button secondary" onClick={() => void toggleQueue()}>
+              {queue.running ? <Pause size={15} /> : <Play size={15} />}{queue.running ? "Stop queue" : "Start queue"}
+            </button>}
+            <button className="button queue-submit" disabled={!queue} onClick={() => setPanel("add")}><Plus size={17} /> Add download</button>
+          </div>
         </header>
+        {queue && <div className="queue-meta">
+          <p className={activeJobs.length ? "queue-state receiving" : "queue-state"}><span />
+            {!queue.running ? "Queue stopped" : activeJobs.length ? "Transfers in progress" : queued ? "Queue waiting" : "Queue idle"}
+          </p>
+          <span>{queue.interface ?? "System default"} · {queue.slots} simultaneous</span>
+        </div>}
         {loadError && <p className="error banner" role="alert">{loadError}</p>}
         {actionError && <p className="error banner" role="alert">{actionError}</p>}
         {state?.run_after && state.run_after > Date.now() && (
@@ -870,8 +1028,16 @@ function App() {
               </button>
             ))}
           </nav>
+          <div className="filter-actions">
+          <ChoicePicker<SortKey> value={sort} onChange={key => { setSort(key); setAscending(key === "name" || key === "status"); }} label="Sort by"
+            options={[["date", "Date added"], ["name", "Name"], ["size", "Size"], ["status", "Status"], ["priority", "Priority"]]} />
+          <button className="icon-button" type="button" title={ascending ? "Ascending" : "Descending"}
+            aria-label={ascending ? "Switch to descending sort" : "Switch to ascending sort"} onClick={() => setAscending(!ascending)}>
+            {ascending ? <ArrowUp size={15} /> : <ArrowDown size={15} />}
+          </button>
           <ChoicePicker value={category} onChange={setCategory} label="File type" icon={<ListFilter size={15} />}
             options={[["", "All types"], ...[...Object.keys(categories), "Other"].map(type => [type, type] as const)]} />
+          </div>
         </div>
         <section className="download-list" aria-label={heading}>
           <table>
@@ -950,15 +1116,17 @@ function App() {
             </div>
           )}
         </section>
-        {state && <footer><HardDrive size={15} /><button title={state.settings.workingFolder} onClick={() => setPanel("settings")}>In progress · {state.settings.workingFolder}</button></footer>}
       </main>
-      {menu && menuJob && <DownloadMenu job={menuJob} anchor={menu} onClose={closeMenu}
+      {menu && menuJob && <DownloadMenu job={menuJob} anchor={menu} canMove={queues.length > 1} onClose={closeMenu}
         onAction={action => void menuAction(menuJob, action)} />}
       {properties && <DownloadProperties job={properties} onClose={() => setPropertiesId(null)} />}
       {panel === "schedule" && state && <ScheduleForm runAfter={state.run_after} dailyWindow={state.daily_window} onClose={closePanel} onSave={refresh} />}
       {panel === "browser" && <BrowserSettings onClose={closePanel} />}
       {replacement && <ReplaceLink job={replacement} onClose={() => setReplacement(null)} onSave={refresh} />}
-      {panel === "add" && <AddDownload onClose={closePanel} onSave={refresh} />}
+      {panel === "add" && queue && <AddDownload queues={queues} initialQueue={queue.id} onClose={closePanel} onSave={refresh} />}
+      {queueForm && <QueueForm queue={queueForm === "new" ? null : queueForm} onClose={() => setQueueForm(null)}
+        onSave={async id => { setQueueId(id); await refresh(); }} />}
+      {moving && <MoveDownload job={moving} queues={queues} onClose={() => setMoving(null)} onSave={refresh} />}
       {panel === "settings" && state && <SettingsForm settings={state.settings} onClose={closePanel} onSave={refresh} />}
     </div>
   );

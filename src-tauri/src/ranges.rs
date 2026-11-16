@@ -69,7 +69,7 @@ pub fn try_download(
     control: &TransferControl,
 ) -> Result<bool, String> {
     control.check()?;
-    let client = transfer::http_client(true)?;
+    let client = transfer::http_client(true, control)?;
     let response = match client
         .head(url)
         .timeout(std::time::Duration::from_secs(10))
@@ -88,7 +88,7 @@ pub fn try_download(
         }
         return Ok(false);
     };
-    let client = transfer::http_client(false)?;
+    let client = transfer::http_client(false, control)?;
     let payload = directory.join("payload");
     let checkpoint = directory.join(CHECKPOINT);
     let previous = File::open(&checkpoint)

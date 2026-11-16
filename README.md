@@ -7,6 +7,8 @@ and Windows. Its local queue, settings, and history use SQLite.
 
 ![Outernet desktop queue with an active, a queued, and a completed download](docs/screenshots/downloads.png)
 
+![Queue settings with a simultaneous download limit and network interface](docs/screenshots/queue-settings.png)
+
 ![Browser extension connected to Outernet with stream quality and HLS download controls](docs/screenshots/browser-extension.png)
 
 ## Install and run
@@ -114,11 +116,25 @@ window can cross midnight. Schedules survive app restarts. **Clear schedule**
 releases the queue. Active transfers and publication of already received files
 continue outside the window.
 
-Set **Simultaneous downloads** in Settings. New jobs start in priority order,
-with older jobs first among equal priorities. Lowering the limit lets active
-downloads finish before new ones start. Change a queued, paused, or failed
-download's priority in its row. The default is one simultaneous desktop
-transfer.
+Use the queue selector to switch queues. **New queue** creates a stopped queue,
+and **Queue settings** sets its name, network interface, and simultaneous
+download limit. Existing downloads migrate to **Main queue**. Use **Start queue**
+and **Stop queue** to control the selected queue. A stopped file transfer goes
+back to its queue and resumes from verified ranges when available. Stopping
+a queue finalizes its active live recordings.
+
+**System default** follows the system route. A selected interface is resolved
+at the start of each transfer. Outernet binds HTTP transfers to its source IP
+and also to the adapter on Linux. YouTube transfers use the selected source
+IP through yt-dlp. The system manages routing and DNS. Browser-assisted
+transfers that Chrome or Firefox fetch themselves use the browser's own
+network route. Other links sent from the extension enter **Main queue**.
+
+In **Add download** choose the destination queue, or use **Move to queue** in
+a row's action menu. Sort the list by date added, name, size, status or priority.
+New downloads start in priority order within the global schedule, with older
+jobs first among equal priorities. Lowering the limit lets active downloads
+finish before more start.
 
 Enable **Keep running in the system tray when closed** to let the queue progress
 after closing the window. Open Outernet from the tray or launch it again to

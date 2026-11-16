@@ -1,3 +1,4 @@
+use crate::network::Binding;
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -13,6 +14,8 @@ pub const MAX_SPEED_KIB: u32 = 1024 * 1024;
 
 pub struct TransferControl {
     paused: AtomicBool,
+    held_for_queue: AtomicBool,
+    binding: Option<Binding>,
     finish_requested: AtomicBool,
     received: AtomicU64,
     completed: AtomicU64,
@@ -32,9 +35,15 @@ pub struct TransferProgress {
 
 impl TransferControl {
     pub fn new(limit_kib: Option<u32>) -> Self {
+        Self::with_binding(limit_kib, None)
+    }
+
+    pub fn with_binding(limit_kib: Option<u32>, binding: Option<Binding>) -> Self {
         let now = Instant::now();
         Self {
             paused: AtomicBool::new(false),
+            held_for_queue: AtomicBool::new(false),
+            binding,
             finish_requested: AtomicBool::new(false),
             received: AtomicU64::new(0),
             completed: AtomicU64::new(0),
@@ -53,7 +62,21 @@ impl TransferControl {
         self.finish_requested.load(Ordering::Relaxed)
     }
 
+    pub fn binding(&self) -> Option<&Binding> {
+        self.binding.as_ref()
+    }
+
+    pub fn hold_for_queue(&self) {
+        self.held_for_queue.store(true, Ordering::Relaxed);
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_held_for_queue(&self) -> bool {
+        self.held_for_queue.load(Ordering::Relaxed)
+    }
+
     pub fn pause(&self) {
+        self.held_for_queue.store(false, Ordering::Relaxed);
         self.paused.store(true, Ordering::Relaxed);
     }
 

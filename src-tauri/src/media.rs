@@ -76,7 +76,7 @@ pub fn download(
     let duration = if format == Format::Youtube {
         youtube::prepare(&url, directory, &mut ffmpeg, max_height, control)?
     } else {
-        let client = transfer::http_client(true)?;
+        let client = transfer::http_client(true, control)?;
         let (manifest_url, manifest) = read_manifest(&client, &url)?;
         match format {
             Format::Hls => prepare_hls(

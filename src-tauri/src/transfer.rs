@@ -61,7 +61,7 @@ pub fn download(
     control.check()?;
     fs::create_dir(directory)
         .map_err(|error| format!("Cannot create the working folder: {error}"))?;
-    let client = http_client(true)?;
+    let client = http_client(true, control)?;
     let mut response = client
         .get(url)
         .send()
@@ -193,7 +193,10 @@ pub fn normalize_folder(path: PathBuf) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn http_client(follow_redirects: bool) -> Result<reqwest::blocking::Client, String> {
+pub fn http_client(
+    follow_redirects: bool,
+    control: &TransferControl,
+) -> Result<reqwest::blocking::Client, String> {
     use reqwest::{header, redirect::Policy};
     use std::time::Duration;
 
@@ -207,7 +210,16 @@ pub fn http_client(follow_redirects: bool) -> Result<reqwest::blocking::Client, 
     } else {
         Policy::none()
     };
-    reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder();
+    let client = if let Some(binding) = control.binding() {
+        let client = client.no_proxy().local_address(binding.address);
+        #[cfg(target_os = "linux")]
+        let client = client.interface(&binding.name);
+        client
+    } else {
+        client
+    };
+    client
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(90))
         .redirect(redirects)

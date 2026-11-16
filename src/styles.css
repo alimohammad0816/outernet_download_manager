@@ -66,10 +66,6 @@ small { margin-top: 3px; }
 .empty { padding: 48px 20px 54px; text-align: center; }
 .empty-icon { display: grid; place-items: center; border-radius: 11px; width: 52px; height: 52px; margin: 0 auto 12px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
 .empty p { margin-top: 6px; }
-footer { display: flex; gap: 8px; align-items: center; margin-top: 13px; font-size: 12px; }
-footer svg { flex: none; }
-footer button { background: none; border: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-footer button:hover { text-decoration: underline; }
 dialog { width: min(94vw, 510px); padding: 22px; border: 1px solid var(--line); background: var(--surface); color: inherit; border-radius: 12px; box-shadow: 0 16px 50px #0003; }
 dialog::backdrop { background: #0007; }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -194,7 +190,6 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .settings-section h3 { margin: 0; font-size: 13px; }
 .settings-section input:not([type="checkbox"]) { background: #0d1113; border-color: #30373b; }
 .settings-section p { font-size: 12px; }
-.settings-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .folder-input .button { min-height: 37px; }
 .switch-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; font-weight: 500; }
 .switch-row input { appearance: none; position: relative; box-sizing: border-box; width: 32px; height: 18px; margin: 0; padding: 0; border: 1px solid #494e50; border-radius: 20px; background: #24292c; flex: none; cursor: pointer; }
@@ -226,3 +221,39 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .download-properties dt { color: var(--muted); }
 .download-properties dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
 .download-properties .checksum { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+.app-header { height: 47px; user-select: none; }
+.app-header .brand { pointer-events: none; }
+.app-actions { align-items: center; }
+.window-controls { display: flex; gap: 1px; padding-left: 9px; margin-left: 7px; border-left: 1px solid var(--line); }
+.window-controls .icon-button { height: 27px; width: 29px; }
+.window-controls .window-close:hover { background: #922b33; color: white; }
+.resize-grip { position: fixed; z-index: 12; }
+.resize-north, .resize-south { left: 6px; right: 6px; height: 4px; cursor: ns-resize; }
+.resize-north { top: 0; }
+.resize-south { bottom: 0; }
+.resize-east, .resize-west { top: 6px; bottom: 6px; width: 4px; cursor: ew-resize; }
+.resize-east { right: 0; }
+.resize-west { left: 0; }
+.resize-northeast, .resize-northwest, .resize-southeast, .resize-southwest { width: 6px; height: 6px; }
+.resize-northeast { top: 0; right: 0; cursor: nesw-resize; }
+.resize-northwest { top: 0; left: 0; cursor: nwse-resize; }
+.resize-southeast { bottom: 0; right: 0; cursor: nwse-resize; }
+.resize-southwest { bottom: 0; left: 0; cursor: nesw-resize; }
+.queue-header { align-items: center; margin-bottom: 9px; }
+.queue-selector, .queue-actions, .filter-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.queue-selector .picker-trigger { max-width: min(37vw, 290px); }
+.queue-selector .picker-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 13px; color: var(--muted); font-size: 12px; }
+.queue-meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.queue-field { display: grid; gap: 5px; }
+.queue-field .picker-trigger { width: 100%; }
+.queue-field .category-picker { min-width: 0; }
+.picker-menu { max-height: min(45vh, 260px); overflow: auto; }
+.workspace-body:has(.queue-field .picker-trigger[aria-expanded="true"]) { padding-bottom: min(45vh, 260px); }
+
+@media (max-width: 790px) {
+  main { padding-top: 19px; }
+  .empty { padding-block: 28px 32px; }
+}

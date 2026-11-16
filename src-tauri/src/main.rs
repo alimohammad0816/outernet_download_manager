@@ -2,6 +2,7 @@
 
 mod browser;
 mod media;
+mod network;
 mod progress;
 mod ranges;
 mod store;
@@ -39,16 +40,58 @@ async fn add_download(
     url: String,
     filename: String,
     sha256: String,
+    queue_id: Option<String>,
 ) -> Result<(), String> {
-    store.add(url, filename, sha256)
+    match queue_id {
+        Some(id) => store.add_to_queue(url, filename, sha256, &id),
+        None => store.add(url, filename, sha256),
+    }
 }
 
 #[tauri::command]
 async fn add_download_batch(
     store: State<'_, Arc<Store>>,
     links: Vec<(String, String)>,
+    queue_id: Option<String>,
 ) -> Result<(), String> {
-    store.add_batch(links)
+    match queue_id {
+        Some(id) => store.add_batch_to_queue(links, &id),
+        None => store.add_batch(links),
+    }
+}
+
+#[tauri::command]
+async fn list_network_interfaces() -> Result<Vec<network::NetworkInterface>, String> {
+    network::interfaces()
+}
+
+#[tauri::command]
+async fn save_download_queue(
+    store: State<'_, Arc<Store>>,
+    id: Option<String>,
+    name: String,
+    slots: u8,
+    interface: Option<String>,
+) -> Result<String, String> {
+    store.save_queue(id, name, slots, interface)
+}
+
+#[tauri::command]
+async fn set_download_queue_running(
+    store: State<'_, Arc<Store>>,
+    id: String,
+    running: bool,
+) -> Result<(), String> {
+    store.set_queue_running(&id, running)
+}
+
+#[tauri::command]
+async fn move_download_to_queue(
+    store: State<'_, Arc<Store>>,
+    id: String,
+    queue_id: String,
+) -> Result<(), String> {
+    store.move_download(&id, &queue_id)
 }
 
 #[tauri::command]
@@ -318,6 +361,10 @@ fn main() {
             save_settings,
             add_download,
             add_download_batch,
+            list_network_interfaces,
+            save_download_queue,
+            set_download_queue_running,
+            move_download_to_queue,
             replace_download_link,
             retry_download,
             open_download,
