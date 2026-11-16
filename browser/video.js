@@ -5,11 +5,12 @@
   const shadow = container.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
   style.textContent = `
-    button { color:#fafafa; background:#18181b; border:1px solid #777; border-radius:7px; padding:7px 11px;
+    button { color:#fafafa; background:#141819; border:1px solid #394a46; border-radius:7px; padding:7px 11px;
       font:600 13px system-ui,sans-serif; cursor:pointer; box-shadow:0 2px 8px #0005 }
-    button:focus-visible { outline:2px solid #bee3fc; outline-offset:2px }
+    button:focus-visible { outline:2px solid #9ae3ca; outline-offset:2px }
     button:disabled { opacity:.75; cursor:wait }
     .choices { margin-top:4px; display:grid; gap:3px; max-width:220px }
+    .choices button:hover { background:#25332f; color:#b4efda }
     .choices:empty { display:none }
     .choices button { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left }
   `;

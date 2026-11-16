@@ -8,16 +8,22 @@
 </head>
 <body>
   <header><img src="icon.png" alt="" width="25" height="25"><h1>Outernet</h1></header>
-  <p id="status" role="status">Checking desktop connection…</p>
-  <label for="quality">Stream quality</label>
-  <select id="quality">
-    <option value="0">Best available</option>
-    <option value="1080">Up to 1080p</option>
-    <option value="720">Up to 720p</option>
-    <option value="480">Up to 480p</option>
-    <option value="360">Up to 360p</option>
-  </select>
-  <label class="auto-setting"><input id="automatic" type="checkbox"> Automatically take over eligible downloads</label>
+  <p id="status" role="status" data-state="checking"><span>Checking desktop connection…</span></p>
+  <section class="preferences">
+    <div class="quality-field">
+      <span id="quality-label">Stream quality</span>
+      <div id="quality" role="group" aria-labelledby="quality-label">
+        <button type="button" data-height="0" aria-pressed="true">Best</button>
+        <button type="button" data-height="1080" aria-pressed="false" title="Up to 1080p">1080p</button>
+        <button type="button" data-height="720" aria-pressed="false" title="Up to 720p">720p</button>
+        <button type="button" data-height="480" aria-pressed="false" title="Up to 480p">480p</button>
+        <button type="button" data-height="360" aria-pressed="false" title="Up to 360p">360p</button>
+      </div>
+    </div>
+    <label class="auto-setting">Take over eligible downloads
+      <input id="automatic" type="checkbox" role="switch">
+    </label>
+  </section>
   <ul id="streams" aria-label="Detected video streams"></ul>
   <p id="hint">Right-click a link to send it to Outernet.</p>
 </body>

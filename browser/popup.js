@@ -1,26 +1,41 @@
 const api = globalThis.browser ?? globalThis.chrome;
 const status = document.querySelector("#status");
+const message = status.querySelector("span");
 const list = document.querySelector("#streams");
-const quality = document.querySelector("#quality");
+const qualities = Array.from(document.querySelectorAll("#quality button"));
 const automatic = document.querySelector("#automatic");
 const { maxHeight, automaticHandoff } = await api.storage.local.get(["maxHeight", "automaticHandoff"]);
 automatic.checked = Boolean(automaticHandoff);
 automatic.addEventListener("change", () => {
   void api.storage.local.set({ automaticHandoff: automatic.checked });
 });
-quality.value = String(maxHeight || 0);
-quality.addEventListener("change", () => {
-  void api.storage.local.set({ maxHeight: Number(quality.value) });
-});
+let selectedHeight = Number(maxHeight) || 0;
+function selectQuality(height) {
+  selectedHeight = qualities.some(button => Number(button.dataset.height) === height) ? height : 0;
+  for (const button of qualities) {
+    button.setAttribute("aria-pressed", String(Number(button.dataset.height) === selectedHeight));
+  }
+}
+function showStatus(text, state) {
+  message.textContent = text;
+  status.dataset.state = state;
+}
+selectQuality(selectedHeight);
+for (const button of qualities) {
+  button.addEventListener("click", () => {
+    selectQuality(Number(button.dataset.height));
+    void api.storage.local.set({ maxHeight: selectedHeight });
+  });
+}
 try {
   const [tab] = await api.tabs.query({ active: true, currentWindow: true });
   const [connection, data] = await Promise.all([
     api.runtime.sendMessage({ action: "ping" }),
     api.runtime.sendMessage({ action: "streams", tabId: tab.id }),
   ]);
-  status.textContent = connection.ok
-    ? (data?.result?.pending ? "Receiving through your browser…" : data?.result?.error || "Desktop app connected")
-    : connection.error;
+  const error = connection.ok ? data?.result?.error : connection.error;
+  showStatus(error || (data?.result?.pending ? "Receiving through your browser…" : "Desktop app connected"),
+    error ? "error" : data?.result?.pending ? "checking" : "connected");
   if (!data?.streams?.length) {
     document.querySelector("#hint").textContent = "Start playing a video to detect its source, or right-click a link to download it.";
   }
@@ -37,10 +52,10 @@ try {
       button.addEventListener("click", async () => {
         button.disabled = true;
         try {
-          const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, format, maxHeight: Number(quality.value) });
-          status.textContent = result.ok ? "Added to Outernet" : result.error;
+          const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, format, maxHeight: selectedHeight });
+          showStatus(result.ok ? "Added to Outernet" : result.error, result.ok ? "connected" : "error");
         } catch {
-          status.textContent = "Could not send this download.";
+          showStatus("Could not send this download.", "error");
         } finally {
           button.disabled = false;
         }
@@ -50,5 +65,5 @@ try {
     list.append(row);
   }
 } catch {
-  status.textContent = "Open Outernet and connect this browser in settings.";
+  showStatus("Open Outernet and connect this browser in settings.", "error");
 }

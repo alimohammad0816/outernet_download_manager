@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, FolderOpen, Globe, HardDrive, ListFilter, Layers, Link, List, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
+import { ArrowDownToLine, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, HardDrive, ListFilter, Layers, Link, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -59,9 +59,9 @@ const statusLabel: Record<Status, string> = {
 };
 
 const filters = [
-  { key: "all", label: "All downloads", icon: List },
-  { key: "complete", label: "Completed", icon: Check },
-  { key: "failed", label: "Failed", icon: CircleAlert },
+  { key: "all", label: "All downloads" },
+  { key: "complete", label: "Completed" },
+  { key: "failed", label: "Failed" },
 ] as const;
 
 function describe(error: unknown) {
@@ -117,7 +117,9 @@ function Modal({ title, onClose, children, className, description, mark }: {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     dialog.current?.showModal();
-    dialog.current?.querySelector<HTMLElement>("[data-initial-focus]")?.focus();
+    const initial = dialog.current?.querySelector<HTMLElement>("[data-initial-focus]")
+      ?? dialog.current?.querySelector<HTMLElement>("#dialog-title");
+    initial?.focus({ preventScroll: true });
   }, []);
 
   return (
@@ -126,7 +128,7 @@ function Modal({ title, onClose, children, className, description, mark }: {
       <div className="dialog-heading">
         <div className="dialog-title-group">
           {description && <span className="dialog-mark">{mark ?? <ArrowDownToLine size={20} />}</span>}
-          <div><h2 id="dialog-title">{title}</h2>
+          <div><h2 id="dialog-title" tabIndex={-1}>{title}</h2>
             {description && <p id="dialog-description">{description}</p>}
           </div>
         </div>
@@ -137,16 +139,11 @@ function Modal({ title, onClose, children, className, description, mark }: {
   );
 }
 
-function FormActions({ busy, error, onClose, label }: { busy: boolean; error: string; onClose: () => void; label: string }) {
-  return (
-    <>
-      {error && <p className="error" role="alert">{error}</p>}
-      <div className="form-actions">
-        <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
-        <button type="submit" className="button primary" disabled={busy}>{busy ? "Saving…" : label}</button>
-      </div>
-    </>
-  );
+function FormActions({ busy, onClose, label }: { busy: boolean; onClose: () => void; label: string }) {
+  return <div className="workspace-footer">
+    <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
+    <button type="submit" className="button queue-submit" disabled={busy}><Check size={16} />{busy ? "Saving…" : label}</button>
+  </div>;
 }
 
 function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => Promise<void> }) {
@@ -200,9 +197,9 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
   }
 
   return (
-    <Modal title="Add download" description="Add links to your download queue." className="add-dialog" onClose={onClose}>
-      <form className="add-form" onSubmit={submit}>
-        <div className="add-body">
+    <Modal title="Add download" description="Enter one or more HTTP or HTTPS links." className="workspace-dialog" onClose={onClose}>
+      <form className="workspace-form" onSubmit={submit}>
+        <div className="workspace-body">
           <div className="download-mode" role="group" aria-label="Download mode">
             <button type="button" aria-pressed={!batch} disabled={busy} onClick={() => changeMode(false)}><Link size={15} /> Single link</button>
             <button type="button" aria-pressed={batch} disabled={busy} onClick={() => changeMode(true)}><Layers size={15} /> Multiple links</button>
@@ -236,7 +233,7 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
           )}
           {error && <p className="error" role="alert">{error}</p>}
         </div>
-        <div className="add-footer">
+        <div className="workspace-footer">
           <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
           <button type="submit" className="button queue-submit" disabled={busy || (batch ? !entries.length || !!issue : !url.trim())}>
             <ArrowDownToLine size={16} />{busy ? "Queuing…" : batch && entries.length ? `Queue ${linkCount}` : "Add to queue"}
@@ -268,15 +265,18 @@ function ReplaceLink({ job, onClose, onSave }: { job: Job; onClose: () => void; 
     }
   }
 
-  return <Modal title="Replace download link" onClose={onClose}>
-    <form onSubmit={submit}>
-      <p className="muted">{job.filename}</p>
-      <label>New URL<input data-initial-focus type="url" value={url} onChange={event => setUrl(event.target.value)} required /></label>
-      {!job.expectedSha256 && <label>Publisher SHA-256 <span>Optional</span>
-        <input value={sha256} onChange={event => setSha256(event.target.value)} spellCheck={false} autoComplete="off" />
-      </label>}
-      <p className="muted">A publisher checksum allows verified parts to carry over to a different source URL when the size and strong ETag match.</p>
-      <FormActions busy={busy} error={error} onClose={onClose} label="Replace and queue" />
+  return <Modal title="Replace download link" description={job.filename} className="workspace-dialog"
+    mark={<Link size={20} />} onClose={onClose}>
+    <form className="workspace-form" onSubmit={submit}>
+      <div className="workspace-body single-fields">
+        <label>New URL<input data-initial-focus type="url" value={url} onChange={event => setUrl(event.target.value)} required /></label>
+        {!job.expectedSha256 && <label>Publisher SHA-256 <span>Optional</span>
+          <input value={sha256} onChange={event => setSha256(event.target.value)} spellCheck={false} autoComplete="off" />
+        </label>}
+        <p className="muted">A publisher checksum allows verified parts to carry over when the size and strong ETag match.</p>
+        {error && <p className="error" role="alert">{error}</p>}
+      </div>
+      <FormActions busy={busy} onClose={onClose} label="Replace and queue" />
     </form>
   </Modal>;
 }
@@ -364,34 +364,51 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
   }
 
   return (
-    <Modal title="Download settings" onClose={onClose}>
-      <form onSubmit={submit}>
-        <p className="muted">Folder changes apply to newly added downloads.</p>
-        {([["workingFolder", "In-progress folder"], ["destinationFolder", "Completed downloads folder"]] as const).map(([key, label]) => (
-          <div className="field" key={key}>
-            <label htmlFor={key}>{label}</label>
-            <div className="folder-input">
-              <input id={key} value={paths[key]} onChange={event => setPaths({ ...paths, [key]: event.target.value })} required />
-              <button type="button" className="button secondary" onClick={() => void choose(key)} aria-label={`Browse for ${label.toLowerCase()}`}><FolderOpen size={16} /> Browse</button>
+    <Modal title="Settings" description="Storage, transfer limits and desktop behavior." mark={<Settings2 size={20} />}
+      className="workspace-dialog settings-dialog" onClose={onClose}>
+      <form className="workspace-form" onSubmit={submit}>
+        <div className="workspace-body">
+          <section className="settings-section">
+            <h3>Storage</h3>
+            {([["workingFolder", "In-progress folder"], ["destinationFolder", "Completed downloads folder"]] as const).map(([key, label]) => (
+              <div className="field" key={key}>
+                <label htmlFor={key}>{label}</label>
+                <div className="folder-input">
+                  <input id={key} value={paths[key]} onChange={event => setPaths({ ...paths, [key]: event.target.value })} required />
+                  <button type="button" className="button secondary" onClick={() => void choose(key)} aria-label={`Browse for ${label.toLowerCase()}`}><FolderOpen size={16} /> Browse</button>
+                </div>
+              </div>
+            ))}
+            <p className="muted">Folder changes apply to newly added downloads.</p>
+          </section>
+          <section className="settings-section">
+            <h3>Transfers</h3>
+            <div className="settings-columns">
+              <label>Speed limit <span>KiB/s per download</span>
+                <input type="number" min="1" max="1048576" step="1" inputMode="numeric" placeholder="Unlimited"
+                  value={limit} onChange={event => setLimit(event.target.value)} />
+              </label>
+              <label>Simultaneous downloads
+                <input type="number" min="1" max="8" step="1" required value={paths.downloadSlots}
+                  onChange={event => setPaths({ ...paths, downloadSlots: event.target.valueAsNumber })} />
+              </label>
             </div>
-          </div>
-        ))}
-        <div className="field">
-          <label htmlFor="speed-limit">Speed limit per download <span>(KiB/s)</span></label>
-          <input id="speed-limit" type="number" min="1" max="1048576" step="1" inputMode="numeric"
-            placeholder="Unlimited" value={limit} onChange={event => setLimit(event.target.value)} aria-describedby="speed-limit-help" />
-          <small id="speed-limit-help">Applies when a transfer starts. Leave blank for unlimited speed.</small>
+          </section>
+          <section className="settings-section">
+            <h3>Desktop</h3>
+            <label className="switch-row">Keep running in the system tray
+              <input type="checkbox" role="switch" checked={paths.keepRunning}
+                onChange={event => setPaths({ ...paths, keepRunning: event.target.checked })} />
+            </label>
+            <label className="switch-row">Notify me when a download completes
+              <input type="checkbox" role="switch" checked={paths.notifyWhenFinished}
+                onChange={event => setPaths({ ...paths, notifyWhenFinished: event.target.checked })} />
+            </label>
+            <UpdateControls />
+          </section>
+          {error && <p className="error" role="alert">{error}</p>}
         </div>
-        <label>Simultaneous downloads
-          <input type="number" min="1" max="8" step="1" required value={paths.downloadSlots}
-            onChange={event => setPaths({ ...paths, downloadSlots: event.target.valueAsNumber })} />
-        </label>
-        <label className="checkbox"><input type="checkbox" checked={paths.keepRunning}
-          onChange={event => setPaths({ ...paths, keepRunning: event.target.checked })} /> Keep running in the system tray when closed</label>
-        <label className="checkbox"><input type="checkbox" checked={paths.notifyWhenFinished}
-          onChange={event => setPaths({ ...paths, notifyWhenFinished: event.target.checked })} /> Notify me when a download completes</label>
-        <UpdateControls />
-        <FormActions busy={busy} error={error} onClose={onClose} label="Save settings" />
+        <FormActions busy={busy} onClose={onClose} label="Save settings" />
       </form>
     </Modal>
   );
@@ -417,18 +434,24 @@ function BrowserSettings({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal title="Browser integration" onClose={onClose}>
-      <div className="browser-help">
-        <p>Load the Outernet browser extension, then connect your browser below.</p>
-        <p className="muted">In Chrome, Edge or Chromium, use Load unpacked in Developer mode. In Firefox, load the Firefox package as a temporary add-on from about:debugging.</p>
-        <div className="browser-actions">
+    <Modal title="Browser integration" description="Register a browser to send files and video to Outernet."
+      mark={<Globe size={20} />} className="workspace-dialog" onClose={onClose}>
+      <div className="workspace-body">
+        <div className="browser-list">
           {([["chrome", "Chrome"], ["edge", "Edge"], ["chromium", "Chromium"], ["firefox", "Firefox"]] as const).map(([browser, label]) => (
-            <button key={browser} type="button" className="button secondary" disabled={busy} onClick={() => void connect(browser, label)}>{label}</button>
+            <div className="browser-row" key={browser}>
+              <span className="browser-name"><Globe size={16} />{label}</span>
+              <button type="button" className="button secondary" disabled={busy} aria-label={`Connect ${label}`} onClick={() => void connect(browser, label)}>Connect</button>
+            </div>
           ))}
         </div>
-        {message && <p role="status">{message}</p>}
+        {message && <p className="message" role="status">{message}</p>}
         {error && <p className="error" role="alert">{error}</p>}
+        <details className="browser-help"><summary>Install the extension</summary>
+          <p>In Chrome, Edge or Chromium, use <strong>Load unpacked</strong> in Developer mode. In Firefox, load the Firefox package as a temporary add-on from <code>about:debugging</code>.</p>
+        </details>
       </div>
+      <div className="workspace-footer"><button type="button" className="button secondary" onClick={onClose}>Done</button></div>
     </Modal>
   );
 }
@@ -447,11 +470,14 @@ function toMinutes(clock: string) {
   return hours * 60 + minutes;
 }
 
-function CategoryPicker({ value, onChange }: { value: string; onChange: (category: string) => void }) {
+function ChoicePicker<T extends string>({ value, onChange, options, label, icon }: {
+  value: T; onChange: (value: T) => void; options: ReadonlyArray<readonly [T, string]>; label: string; icon?: ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const id = useId();
+  const selected = options.find(([key]) => key === value)?.[1];
   useEffect(() => {
     if (!expanded) return;
     function dismiss(event: PointerEvent) {
@@ -470,16 +496,16 @@ function CategoryPicker({ value, onChange }: { value: string; onChange: (categor
       }
     }}>
       <button className="picker-trigger" type="button" ref={trigger} aria-expanded={expanded} aria-controls={id}
-        aria-label={`File type: ${value || "All types"}`} onClick={() => setExpanded(!expanded)}>
-        <ListFilter size={15} /><span>{value || "All types"}</span><ChevronDown size={14} />
+        aria-label={`${label}: ${selected}`} onClick={() => setExpanded(!expanded)}>
+        {icon}<span>{selected}</span><ChevronDown size={14} />
       </button>
-      {expanded && <div className="picker-menu" id={id} role="group" aria-label="File type">
-        {["", ...Object.keys(categories), "Other"].map(category => (
-          <button type="button" key={category} aria-pressed={category === value} onClick={() => {
-            onChange(category);
+      {expanded && <div className="picker-menu" id={id} role="group" aria-label={label}>
+        {options.map(([key, text]) => (
+          <button type="button" key={key} aria-pressed={key === value} onClick={() => {
+            onChange(key);
             setExpanded(false);
             trigger.current?.focus();
-          }}>{category || "All types"}{category === value && <Check size={15} />}</button>
+          }}>{text}{key === value && <Check size={15} />}</button>
         ))}
       </div>}
     </div>
@@ -596,10 +622,10 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
   }
 
   return (
-    <Modal title="Queue schedule" description="Choose when queued downloads can start." className="add-dialog schedule-dialog"
+    <Modal title="Queue schedule" description="Choose when queued downloads can start." className="workspace-dialog"
       mark={<CalendarClock size={20} />} onClose={onClose}>
-      <form className="add-form" onSubmit={event => { event.preventDefault(); void save(); }}>
-        <div className="add-body schedule-body">
+      <form className="workspace-form" onSubmit={event => { event.preventDefault(); void save(); }}>
+        <div className="workspace-body schedule-body">
           <section className="schedule-card">
             <div className="schedule-card-title"><h3>Hold until</h3>
               {(date || time) && <button type="button" className="quiet-button" onClick={() => { setDate(""); setTime(""); }}>Remove hold</button>}
@@ -619,7 +645,7 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
           </section>
           {error && <p className="error" role="alert">{error}</p>}
         </div>
-        <div className="add-footer">
+        <div className="workspace-footer">
           {(runAfter || dailyWindow) && <button type="button" className="quiet-button clear-schedule" disabled={busy}
             onClick={() => void save(true)}>Clear schedule</button>}
           <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
@@ -692,29 +718,22 @@ function App() {
   return (
     <div className="layout">
       <header className="app-header">
-        <div className="brand"><img className="brand-icon" src="/outernet.svg" width={29} height={29} alt="" /> Outernet</div>
+        <div className="brand"><img className="brand-icon" src="/outernet.svg" width={28} height={28} alt="" /> Outernet</div>
         <div className="app-actions">
+          <button className="icon-button" title="Queue schedule" aria-label="Queue schedule" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /></button>
           <button className="icon-button" title="Browser integration" aria-label="Browser integration" onClick={() => setPanel("browser")}><Globe size={17} /></button>
           <button className="icon-button" title="Settings" aria-label="Settings" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /></button>
         </div>
       </header>
-      <aside className="sidebar">
-        <nav aria-label="Download filters">
-          {filters.map(({ icon: Icon, label, key }) => (
-            <button key={key} className={filter === key ? "nav-button selected" : "nav-button"} aria-pressed={filter === key} onClick={() => setFilter(key)}>
-              <Icon size={17} /> {label}
-              <span className="count">{key === "all" ? jobs.length : jobs.filter(job => job.status === key).length}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-tools">
-        <button className="nav-button" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /> Queue schedule</button>
-        </div>
-      </aside>
       <main>
         <header className="queue-header">
-          <h1>{heading}</h1>
-          <button className="button primary" disabled={!state} onClick={() => setPanel("add")}><Plus size={17} /> Add download</button>
+          <div>
+            {state && <p className={activeJobs.length ? "queue-state receiving" : "queue-state"}>
+              <span />{activeJobs.length ? "Transfers in progress" : queued ? "Queue waiting" : "Queue idle"}
+            </p>}
+            <h1>Downloads</h1>
+          </div>
+          <button className="button queue-submit" disabled={!state} onClick={() => setPanel("add")}><Plus size={17} /> Add download</button>
         </header>
         {loadError && <p className="error banner" role="alert">{loadError}</p>}
         {actionError && <p className="error banner" role="alert">{actionError}</p>}
@@ -729,11 +748,21 @@ function App() {
           </button>
         )}
         {state && <dl className="queue-summary" aria-label="Queue summary">
+          <div><dt>Download speed</dt><dd className={transferRate > 0 ? "receiving" : undefined}>{displaySize(transferRate)}/s</dd></div>
           <div><dt>Active</dt><dd>{activeJobs.length}</dd></div>
           <div><dt>Queued</dt><dd>{queued}</dd></div>
-          <div><dt>Download speed</dt><dd className={transferRate > 0 ? "receiving" : undefined}>{displaySize(transferRate)}/s</dd></div>
         </dl>}
-        <div className="category-filter"><CategoryPicker value={category} onChange={setCategory} /></div>
+        <div className="queue-controls">
+          <nav className="queue-tabs" aria-label="Download filters">
+            {filters.map(({ label, key }) => (
+              <button key={key} type="button" aria-pressed={filter === key} onClick={() => setFilter(key)}>
+                {key === "all" ? "All" : label}
+              </button>
+            ))}
+          </nav>
+          <ChoicePicker value={category} onChange={setCategory} label="File type" icon={<ListFilter size={15} />}
+            options={[["", "All types"], ...[...Object.keys(categories), "Other"].map(type => [type, type] as const)]} />
+        </div>
         <section className="download-list" aria-label={heading}>
           <table>
             <thead><tr><th>File</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>
@@ -741,20 +770,19 @@ function App() {
               {visible.map(job => (
                 <tr key={job.id}>
                   <td>
-                    <strong className="filename" title={job.filename}>{job.filename}</strong>
-                    <small>{hostname(job.url)}</small>
-                    {(job.status === "queued" || job.status === "paused" || job.status === "failed") && (
-                      <label className="priority-control">Priority
-                        <select value={job.priority} aria-label={`Priority for ${job.filename}`}
-                          onChange={event => void setPriority(job.id, event.target.value as Priority)}>
-                          <option value="low">Low</option>
-                          <option value="normal">Normal</option>
-                          <option value="high">High</option>
-                        </select>
-                      </label>
-                    )}
-                    {job.transfer && <DownloadProgress transfer={job.transfer} />}
-                    {job.error && <small className="error">{job.error}</small>}
+                    <div className="file-cell"><span className="file-mark"><File size={16} /></span><div className="file-details">
+                      <strong className="filename" title={job.filename}>{job.filename}</strong>
+                      <small>{hostname(job.url)}</small>
+                      {(job.status === "queued" || job.status === "paused" || job.status === "failed") && (
+                        <div className="priority-control"><span>Priority</span>
+                          <ChoicePicker<Priority> value={job.priority} label={`Priority for ${job.filename}`}
+                            options={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]}
+                            onChange={priority => void setPriority(job.id, priority)} />
+                        </div>
+                      )}
+                      {job.transfer && <DownloadProgress transfer={job.transfer} />}
+                      {job.error && <small className="error">{job.error}</small>}
+                    </div></div>
                   </td>
                   <td><span className={`badge ${job.status}`}>{job.format === "hls_live" && job.status === "downloading" ? "Recording" : statusLabel[job.status]}</span>
                     {job.status === "complete" && job.expectedSha256 && <small>SHA-256 verified</small>}</td>
