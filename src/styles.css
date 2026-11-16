@@ -146,8 +146,10 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .link-preview .preview-more { color: var(--muted); }
 .workspace-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 24px; border-top: 1px solid #282e31; background: #151a1c; }
 .workspace-footer .button { min-height: 37px; }
-.queue-submit { padding-inline: 14px; background: #e7efed; color: #16201d; }
-.queue-submit:hover:not(:disabled) { background: #c8eade; }
+.queue-submit { padding-inline: 14px; background: #fafafa; color: #141414; }
+.queue-submit:hover:not(:disabled) { background: #e8e8e8; }
+.queue-submit:focus-visible { outline-color: #f4f4f4; }
+.queue-submit:disabled { background: #777; color: #252525; opacity: 1; }
 
 .category-picker { position: relative; }
 .picker-trigger { display: flex; align-items: center; gap: 8px; min-height: 35px; padding: 0 11px; border: 1px solid #30373b; border-radius: 8px; background: #14191b; color: #e6edef; text-align: left; }
