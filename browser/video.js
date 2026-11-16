@@ -80,7 +80,7 @@
     button.textContent = "Sending…";
     try {
       const result = await api.runtime.sendMessage({ action: "download", ...source });
-      button.textContent = result.ok ? "Added to Outernet" : "Could not queue video";
+      button.textContent = result.ok ? (result.popup ? "Opening download window…" : "Added to Outernet") : "Could not open download";
       button.title = result.error || "";
     } catch {
       button.textContent = "Outernet unavailable";

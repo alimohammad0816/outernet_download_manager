@@ -69,17 +69,16 @@ async function download(tabId, source) {
         await api.storage.session.set({ [`result:${tabId}`]: { pending: true } });
         await api.action.setBadgeText({ tabId, text: "↓" }).catch(() => {});
       }
-      await receiveWithBrowser(api, HOST, url, { filename: source.filename });
-      response = { ok: true };
+      response = await receiveWithBrowser(api, HOST, url, { filename: source.filename, interactive: true });
     } catch (error) {
       response = { ok: false, error: error.message };
     }
   } else {
-    response = await requestHost({ action: "download", url, filename: video?.filename ?? source.filename, format: source.format, max_height: height });
+    response = await requestHost({ action: "download", url, filename: video?.filename ?? source.filename, format: source.format, max_height: height, interactive: true });
   }
   if (Number.isInteger(tabId) && tabId >= 0) {
     await api.storage.session.set({ [`result:${tabId}`]: response });
-    await api.action.setBadgeText({ tabId, text: response.ok ? "" : "!" }).catch(() => {});
+    await api.action.setBadgeText({ tabId, text: response.ok ? "✓" : "!" }).catch(() => {});
   }
   return response;
 }

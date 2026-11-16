@@ -1,4 +1,4 @@
-use super::{disk_error, media_command};
+use super::{disk_error, engine_path, media_command};
 use crate::{progress::TransferControl, transfer};
 use std::{
     fs::{self, File},
@@ -73,6 +73,12 @@ fn download_track(
     let metadata = directory.join(format!("{name}.duration"));
     let stderr = tempfile::tempfile_in(directory).map_err(disk_error)?;
     let mut command = media_command("yt-dlp");
+    let node = engine_path("node");
+    let runtime = if node.is_absolute() {
+        format!("node:{}", node.display())
+    } else {
+        "node".into()
+    };
     command
         .current_dir(directory)
         .args([
@@ -88,8 +94,6 @@ fn download_track(
             "20",
             "--retries",
             "3",
-            "--js-runtimes",
-            "node",
             "--print",
             "before_dl:duration",
             "--format",
@@ -97,6 +101,7 @@ fn download_track(
             "--output",
         ])
         .arg(format!("{name}.%(ext)s"))
+        .args(["--js-runtimes", &runtime])
         .stdout(File::create(&metadata).map_err(disk_error)?)
         .stderr(stderr.try_clone().map_err(disk_error)?);
     control.proxy().configure_command(&mut command);
@@ -110,7 +115,7 @@ fn download_track(
     }
     let mut child = command.arg("--").arg(url).spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            "Install yt-dlp and make it available on PATH to download YouTube videos.".to_string()
+            "The YouTube engine is missing. Repair or reinstall Outernet.".to_string()
         } else {
             format!("Cannot start yt-dlp: {error}")
         }
@@ -122,7 +127,7 @@ fn download_track(
     }
     control.check()?;
     if !status.map_err(disk_error)?.success() {
-        return Err("YouTube did not provide a downloadable track. Check your connection and yt-dlp version.".into());
+        return Err("YouTube did not provide a downloadable track. Check that the video plays in your browser and try again.".into());
     }
     let mut metadata_text = String::new();
     File::open(metadata)

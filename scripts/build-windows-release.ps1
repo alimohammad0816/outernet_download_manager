@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$config = @{ bundle = @{} }
+$config = @{ bundle = @{ resources = @{ "engines/" = "engines/" } } }
 $certificate = $null
 $certificatePath = Join-Path $env:RUNNER_TEMP 'outernet-signing.pfx'
 $configPath = Join-Path $env:RUNNER_TEMP 'outernet-release.json'
@@ -36,6 +36,19 @@ try {
     # Child processes need the Tauri signing key but never need the PFX secrets.
     Remove-Item Env:WINDOWS_CERTIFICATE, Env:WINDOWS_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
     Remove-Item $certificatePath -ErrorAction SilentlyContinue
+    node scripts/stage-media.mjs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $ffmpegPackage = Join-Path $env:ChocolateyInstall 'lib/ffmpeg'
+    $ffmpeg = Get-ChildItem $ffmpegPackage -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+    $license = Get-ChildItem $ffmpegPackage -Recurse -File |
+        Where-Object { $_.Name -in 'LICENSE', 'LICENSE.txt', 'COPYING.GPLv3' } | Select-Object -First 1
+    if (!$ffmpeg -or !$license) { throw 'The FFmpeg package is missing its executable or license.' }
+    Copy-Item $ffmpeg.FullName 'src-tauri/engines/ffmpeg.exe'
+    Copy-Item (Join-Path $ffmpeg.DirectoryName 'ffprobe.exe') 'src-tauri/engines/ffprobe.exe'
+    Copy-Item $license.FullName 'src-tauri/engines/FFMPEG-LICENSE.txt'
+    $ffmpegVersion = & $ffmpeg.FullName -version | Select-Object -First 1
+    Add-Content 'src-tauri/engines/MEDIA-SOURCES.txt' "${ffmpegVersion}: https://ffmpeg.org/download.html"
+
     $config | ConvertTo-Json -Depth 8 | Set-Content $configPath -Encoding utf8
     npm run tauri -- build --bundles nsis --config $configPath -- --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

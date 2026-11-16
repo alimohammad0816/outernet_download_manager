@@ -16,13 +16,12 @@ and Windows. Its local queue, settings, and history use SQLite.
 Get the x86-64 desktop installer and browser extension from the
 [Desktop builds workflow](https://github.com/alimohammad0816/outernet_download_manager/actions/workflows/build.yml)
 or the matching [GitHub Release](https://github.com/alimohammad0816/outernet_download_manager/releases).
-The Linux `.deb` depends on FFmpeg. On Windows, install FFmpeg separately and
-ensure `ffmpeg` and `ffprobe` are available on PATH
-when launching Outernet.
+The installers bundle yt-dlp and Node.js. Windows also bundles FFmpeg and
+ffprobe. The Linux `.deb` declares FFmpeg as a package dependency.
 
 For development, install Node.js 24, stable Rust, CMake, the
-[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), and the engines
-above.
+[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Local
+development builds use the tools on PATH unless built with the packaged engines.
 
 ```sh
 npm ci
@@ -83,18 +82,27 @@ server window advances past a missing segment. The output is Matroska
 (`.mkv`).
 
 YouTube watch and Shorts links can be sent from the extension's video button
-or popup, and pasted into the desktop app. YouTube downloads require current
-[yt-dlp](https://github.com/yt-dlp/yt-dlp#installation), Node.js, FFmpeg and
-ffprobe on the app's PATH. This path handles public on-demand videos and
-uses the configured in-progress folder for both media tracks before merging
+or popup, and pasted into the desktop app. Outernet uses its bundled
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) with Node.js for public on-demand
+videos. It uses the configured in-progress folder for both media tracks before merging
 and verifying the MKV.
 
 ## Manage downloads
 
+**Add download** and direct links sent by the browser extension open a separate
+window. Choose a download queue and destination folder, which starts with the
+default from Settings. **Download now** starts a transfer as soon as the chosen
+queue has an available slot. **Download later** saves the item until the queue
+is started or you explicitly start that item. The same window shows progress
+and gives you **Open file**, **Open folder**, and **Close** when finished.
+Use **Add multiple links** for a batch. When you send a link using the browser
+session option, the browser first passes the verified response to Outernet.
+
 Double-click a completed download to open it with your system's default app.
 Right-click a row or use its **More actions** button for **Show in folder**,
-**Properties** and the actions available for that download. **Remove from history**
-removes the completed entry and keeps the downloaded file on disk.
+**Properties** and the actions available for that download. **Remove from list**
+stops an active transfer and removes its working files. It keeps any completed
+file on disk.
 
 In **Add download**, select **Multiple links** and paste one URL per line
 (up to 500). Check the file preview, then queue the links. Outernet validates
@@ -128,7 +136,7 @@ at the start of each transfer. Outernet binds HTTP transfers to its source IP
 and also to the adapter on Linux. YouTube transfers use the selected source
 IP through yt-dlp. The system manages routing and DNS. Browser-assisted
 transfers that Chrome or Firefox fetch themselves use the browser's own
-network route. Other links sent from the extension enter **Main queue**.
+network route. The single-download popup lets you choose the queue for a link sent from the extension.
 
 Under **Settings → Network → Proxy**, select **System proxy**, **Direct**, or
 **Custom**. System mode follows proxy environment variables and manual proxy

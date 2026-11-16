@@ -20,7 +20,7 @@ type Settings = {
 type Priority = "low" | "normal" | "high";
 type DailyWindow = { startMinute: number; endMinute: number };
 type TransferProgress = { totalBytes: number | null; completedBytes: number; bytesPerSecond: number };
-type Status = "queued" | "downloading" | "pausing" | "paused" | "verifying" | "ready" | "complete" | "failed";
+type Status = "draft" | "queued" | "downloading" | "pausing" | "paused" | "verifying" | "ready" | "complete" | "failed";
 type Job = {
   id: string;
   url: string;
@@ -29,6 +29,8 @@ type Job = {
   addedAt: number | null;
   format?: "file" | "hls" | "hls_live" | "dash" | "youtube";
   status: Status;
+  removing?: boolean;
+  deferred?: boolean;
   priority: Priority;
   settings: Settings;
   expectedSha256: string | null;
@@ -58,6 +60,7 @@ function fileCategory(filename: string) {
 type Panel = "add" | "settings" | "browser" | "schedule";
 
 const statusLabel: Record<Status, string> = {
+  draft: "Ready to add",
   queued: "Queued",
   downloading: "Downloading",
   pausing: "Pausing",
@@ -160,11 +163,7 @@ function AddDownload({ queues, initialQueue, onClose, onSave }: {
   queues: DownloadQueue[]; initialQueue: string; onClose: () => void; onSave: () => Promise<void>;
 }) {
   const [queueId, setQueueId] = useState(initialQueue);
-  const [url, setUrl] = useState("");
-  const [batch, setBatch] = useState(false);
   const [links, setLinks] = useState("");
-  const [filename, setFilename] = useState<string | null>(null);
-  const [sha256, setSha256] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -184,22 +183,13 @@ function AddDownload({ queues, initialQueue, onClose, onSave }: {
     : invalid ? `Line ${invalid.line} needs a valid HTTP or HTTPS link.` : "";
   const linkCount = entries.length === 1 ? "1 link" : `${entries.length} links`;
 
-  function changeMode(multiple: boolean) {
-    setBatch(multiple);
-    setError("");
-  }
-
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy || (batch && (!entries.length || issue))) return;
+    if (busy || !entries.length || issue) return;
     setBusy(true);
     setError("");
     try {
-      if (batch) {
-        await invoke("add_download_batch", { links: entries.map(entry => [entry.url, entry.filename]), queueId });
-      } else {
-        await invoke("add_download", { url, filename: filename ?? suggestedName(url), sha256, queueId });
-      }
+      await invoke("add_download_batch", { links: entries.map(entry => [entry.url, entry.filename]), queueId });
       await onSave();
       onClose();
     } catch (failure) {
@@ -210,40 +200,28 @@ function AddDownload({ queues, initialQueue, onClose, onSave }: {
   }
 
   return (
-    <Modal title="Add download" description="Enter one or more HTTP or HTTPS links." className="workspace-dialog" onClose={onClose}>
+    <Modal title="Add multiple links" description="Enter one HTTP or HTTPS link per line." className="workspace-dialog" onClose={onClose}>
       <form className="workspace-form" onSubmit={submit}>
         <div className="workspace-body">
-          <div className="download-mode" role="group" aria-label="Download mode">
-            <button type="button" aria-pressed={!batch} disabled={busy} onClick={() => changeMode(false)}><Link size={15} /> Single link</button>
-            <button type="button" aria-pressed={batch} disabled={busy} onClick={() => changeMode(true)}><Layers size={15} /> Multiple links</button>
-          </div>
-          {batch ? (
-            <div className="batch-field">
-              <div className="field-heading"><label htmlFor="batch-links">Download links</label><span id="batch-hint">One link per line</span></div>
-              <div className="link-editor">
-                <textarea id="batch-links" rows={5} value={links}
-                  onChange={event => { setLinks(event.target.value); setError(""); }}
-                  placeholder={"https://example.com/report.pdf\nhttps://example.com/archive.zip"}
-                  spellCheck={false} autoComplete="off" aria-invalid={!!issue} aria-describedby="batch-hint batch-feedback" />
-                <div className="editor-info" id="batch-feedback" aria-live="polite">
-                  <span className={issue ? "error" : undefined}>{issue || (entries.length ? `${linkCount} detected` : "Paste links from your clipboard")}</span>
-                  <span>{entries.length} / 500</span>
-                </div>
+          <div className="batch-field">
+            <div className="field-heading"><label htmlFor="batch-links">Download links</label><span id="batch-hint">One link per line</span></div>
+            <div className="link-editor">
+              <textarea id="batch-links" rows={5} value={links}
+                onChange={event => { setLinks(event.target.value); setError(""); }}
+                placeholder={"https://example.com/report.pdf\nhttps://example.com/archive.zip"}
+                spellCheck={false} autoComplete="off" aria-invalid={!!issue} aria-describedby="batch-hint batch-feedback" />
+              <div className="editor-info" id="batch-feedback" aria-live="polite">
+                <span className={issue ? "error" : undefined}>{issue || (entries.length ? `${linkCount} detected` : "Paste links from your clipboard")}</span>
+                <span>{entries.length} / 500</span>
               </div>
-              {entries.length > 0 && !issue && (
-                <ul className="link-preview" aria-label="Files to queue">
-                  {entries.slice(0, 2).map(entry => <li key={entry.line}><ArrowDownToLine size={14} /><span title={entry.filename}>{entry.filename}</span></li>)}
-                  {entries.length > 2 && <li className="preview-more">+{entries.length - 2} more</li>}
-                </ul>
-              )}
             </div>
-          ) : (
-            <div className="single-fields">
-              <label>Download link<input data-initial-focus type="url" placeholder="https://example.com/file.zip" value={url} onChange={event => setUrl(event.target.value)} required /></label>
-              <label>Filename<input value={filename ?? suggestedName(url)} onChange={event => setFilename(event.target.value)} required /></label>
-              <label>SHA-256 <span>Optional</span><input spellCheck={false} autoComplete="off" value={sha256} onChange={event => setSha256(event.target.value)} placeholder="Publisher checksum" /></label>
-            </div>
-          )}
+            {entries.length > 0 && !issue && (
+              <ul className="link-preview" aria-label="Files to queue">
+                {entries.slice(0, 2).map(entry => <li key={entry.line}><ArrowDownToLine size={14} /><span title={entry.filename}>{entry.filename}</span></li>)}
+                {entries.length > 2 && <li className="preview-more">+{entries.length - 2} more</li>}
+              </ul>
+            )}
+          </div>
           <div className="queue-field"><span>Download queue</span>
             <ChoicePicker value={queueId} onChange={setQueueId} label="Download queue"
               options={queues.map(queue => [queue.id, queue.name])} />
@@ -252,13 +230,145 @@ function AddDownload({ queues, initialQueue, onClose, onSave }: {
         </div>
         <div className="workspace-footer">
           <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
-          <button type="submit" className="button queue-submit" disabled={busy || (batch ? !entries.length || !!issue : !url.trim())}>
-            <ArrowDownToLine size={16} />{busy ? "Queuing…" : batch && entries.length ? `Queue ${linkCount}` : "Add to queue"}
+          <button type="submit" className="button queue-submit" disabled={busy || !entries.length || !!issue}>
+            <ArrowDownToLine size={16} />{busy ? "Queuing…" : entries.length ? `Queue ${linkCount}` : "Add to queue"}
           </button>
         </div>
       </form>
     </Modal>
   );
+}
+
+function SingleDownload({ draftId, initialQueue }: { draftId: string | null; initialQueue: string }) {
+  const [state, setState] = useState<Snapshot>();
+  const [id, setId] = useState(draftId);
+  const [url, setUrl] = useState("");
+  const [filename, setFilename] = useState<string>();
+  const [destination, setDestination] = useState<string>();
+  const [queueId, setQueueId] = useState(initialQueue);
+  const [sha256, setSha256] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const job = state?.jobs.find(item => item.id === id);
+  const source = job?.status === "draft" ? job.url : url;
+  const name = filename ?? (draftId ? job?.filename : suggestedName(url)) ?? "";
+  const folder = destination ?? state?.settings.destinationFolder ?? "";
+  const queue = state?.queues.find(item => item.id === queueId) ?? state?.queues[0];
+  const appWindow = getCurrentWindow();
+
+  useEffect(() => {
+    let closed = false;
+    let loading = false;
+    const refresh = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const snapshot = await invoke<Snapshot>("snapshot");
+        if (!closed) {
+          setState(snapshot);
+          setLoadError("");
+        }
+      } catch (failure) {
+        if (!closed) setLoadError(describe(failure));
+      } finally {
+        loading = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 500);
+    return () => { closed = true; window.clearInterval(timer); };
+  }, []);
+
+  async function act(action: () => Promise<unknown>) {
+    setError("");
+    setBusy(true);
+    try {
+      await action();
+    } catch (failure) {
+      setError(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!queue || busy) return;
+    const now = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") !== "later";
+    await act(async () => {
+      const jobId = await invoke<string>("submit_single_download", {
+        choice: { id: draftId, url: source, filename: name, sha256, queueId: queue.id, destination: folder, now },
+      });
+      setId(jobId);
+      setState(await invoke<Snapshot>("snapshot"));
+    });
+  }
+
+  const committed = job && job.status !== "draft";
+  const missing = state && id && !job;
+  const heading = committed ? job.status === "complete" ? "Download complete" : "Download" : "New download";
+  const canResume = (job?.deferred || job?.status === "paused" || job?.status === "failed") && !job?.removing;
+
+  return <div className="layout single-window">
+    <header className="app-header" onMouseDown={event => {
+      if (event.button === 0 && event.detail === 1 && event.target === event.currentTarget) {
+        event.preventDefault();
+        void appWindow.startDragging().catch(failure => setError(describe(failure)));
+      }
+    }}>
+      <div className="brand"><img className="brand-icon" src="/outernet.svg" width={28} height={28} alt="" /> Outernet</div>
+      <WindowControls onError={setError} />
+    </header>
+    <main>
+      <h2>{heading}</h2>
+      {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
+      {missing ? <p className="muted">This download is no longer in the list.</p>
+        : committed ? <>
+          <section className="settings-section single-status">
+            <strong>{job.filename}</strong>
+            <small title={job.settings.destinationFolder}>{job.settings.destinationFolder}</small>
+            <p role="status">{job.removing ? "Removing…" : job.deferred ? "Saved for later" : statusLabel[job.status]} · {displaySize(job.bytes)}</p>
+            {job.transfer && <DownloadProgress transfer={job.transfer} />}
+            {job.status === "downloading" && !(job.transfer?.totalBytes && job.transfer.totalBytes > 0) && (
+              <div className="download-progress"><progress aria-label="Downloading" /></div>
+            )}
+            {job.error && <p className="error">{job.error}</p>}
+          </section>
+          <div className="single-actions">
+            {job.status === "complete" && <>
+              <button className="button secondary" disabled={busy} onClick={() => void act(() => invoke("open_download", { id: job.id, reveal: true }))}>Open folder</button>
+              <button className="button queue-submit" disabled={busy} onClick={() => void act(() => invoke("open_download", { id: job.id, reveal: false }))}>Open file</button>
+            </>}
+            {canResume && <button className="button queue-submit" disabled={busy} onClick={() => void act(() => invoke("retry_download", { id: job.id }))}>{job.deferred ? "Download now" : job.status === "failed" ? "Retry" : "Resume"}</button>}
+            {job.status === "downloading" && !job.removing && <button className="button secondary" disabled={busy} onClick={() => void act(() => invoke(job.format === "hls_live" ? "stop_recording" : "pause_download", { id: job.id }))}>{job.format === "hls_live" ? "Stop and save" : "Pause"}</button>}
+            <button className="button secondary" onClick={() => void act(() => appWindow.close())}>Close</button>
+          </div>
+        </> : state && queue && (!draftId || job) ? <form className="single-fields" onSubmit={submit}>
+          <label>Download link<input type="url" placeholder="https://example.com/file.zip" value={source}
+            readOnly={!!draftId} onChange={event => setUrl(event.target.value)} required /></label>
+          <label>Filename<input value={name} onChange={event => setFilename(event.target.value)} required /></label>
+          <div className="field"><label htmlFor="single-folder">Destination folder</label>
+            <div className="folder-input">
+              <input id="single-folder" value={folder} onChange={event => setDestination(event.target.value)} required />
+              <button type="button" className="button secondary" onClick={() => void act(async () => {
+                const chosen = await open({ directory: true, defaultPath: folder || undefined });
+                if (chosen) setDestination(chosen);
+              })}><FolderOpen size={16} /> Browse</button>
+            </div>
+          </div>
+          <div className="queue-field"><span>Download queue</span>
+            <ChoicePicker label="Download queue" fitWorkspace value={queue.id} onChange={setQueueId} options={state.queues.map(item => [item.id, item.name])} />
+          </div>
+          {!draftId && <details><summary>SHA-256 checksum</summary><label className="sr-only" htmlFor="single-hash">SHA-256 checksum</label>
+            <input id="single-hash" value={sha256} onChange={event => setSha256(event.target.value)} placeholder="Publisher checksum" /></details>}
+          <div className="single-actions">
+            <button type="submit" className="button queue-submit" disabled={busy}>Download now</button>
+            <button type="submit" value="later" className="button secondary" disabled={busy}>Download later</button>
+          </div>
+        </form> : <p className="muted">Loading download…</p>}
+    </main>
+  </div>;
 }
 
 function ReplaceLink({ job, onClose, onSave }: { job: Job; onClose: () => void; onSave: () => Promise<void> }) {
@@ -866,14 +976,15 @@ function DownloadMenu({ job, anchor, canMove, onClose, onAction }: {
   const options: Array<[DownloadAction, string]> = [];
   if (job.status === "complete") options.push(["open", "Open file"], ["reveal", "Show in folder"]);
   if (job.status === "downloading" && job.format === "hls_live") options.push(["stop", "Stop and save recording"]);
-  else if (job.status === "queued" || job.status === "downloading") options.push(["pause", "Pause"]);
+  else if ((job.status === "queued" && !job.deferred) || job.status === "downloading") options.push(["pause", "Pause"]);
+  if (job.deferred) options.push(["retry", "Download now"]);
   if (job.status === "paused" || job.status === "failed") {
     options.push(["retry", job.status === "paused" ? "Resume" : "Retry"]);
     if (!job.sha256) options.push(["replace", "Replace link"]);
   }
   if (canMove && ["queued", "paused", "failed", "complete"].includes(job.status)) options.push(["move", "Move to queue"]);
   options.push(["properties", "Properties"]);
-  if (job.status === "complete") options.push(["forget", "Remove from history"]);
+  if (!job.removing) options.push(["forget", "Remove from list"]);
 
   return <div className="download-menu" role="menu" aria-label={`Actions for ${job.filename}`} ref={menu}
     onKeyDown={event => {
@@ -991,7 +1102,7 @@ function App() {
     else if (action === "forget") {
       setActionError("");
       try {
-        await invoke("remove_completed_download", { id: job.id });
+        await invoke("remove_download", { id: job.id });
         await refresh();
       } catch (failure) {
         setActionError(describe(failure));
@@ -1001,7 +1112,7 @@ function App() {
     }
   }
 
-  const jobs = state?.jobs ?? [];
+  const jobs = state?.jobs.filter(job => job.status !== "draft") ?? [];
   const queues = state?.queues ?? [];
   const queue = queues.find(item => item.id === queueId) ?? queues[0];
   const queueJobs = jobs.filter(job => job.queueId === queue?.id);
@@ -1067,7 +1178,10 @@ function App() {
             {queue && <button type="button" className="button secondary" onClick={() => void toggleQueue()}>
               {queue.running ? <Pause size={15} /> : <Play size={15} />}{queue.running ? "Stop queue" : "Start queue"}
             </button>}
-            <button className="button queue-submit" disabled={!queue} onClick={() => setPanel("add")}><Plus size={17} /> Add download</button>
+            <button className="icon-button" title="Add multiple links" aria-label="Add multiple links" disabled={!queue} onClick={() => setPanel("add")}><Layers size={17} /></button>
+            <button className="button queue-submit" disabled={!queue} onClick={() => {
+              if (queue) void invoke("show_download_window", { queueId: queue.id }).catch(failure => setActionError(describe(failure)));
+            }}><Plus size={17} /> Add download</button>
           </div>
         </header>
         {queue && <div className="queue-meta">
@@ -1150,7 +1264,7 @@ function App() {
                       {job.error && <small className="error">{job.error}</small>}
                     </div></div>
                   </td>
-                  <td><span className={`badge ${job.status}`}>{job.format === "hls_live" && job.status === "downloading" ? "Recording" : statusLabel[job.status]}</span>
+                  <td><span className={`badge ${job.status}`}>{job.removing ? "Removing…" : job.deferred ? "Saved for later" : job.format === "hls_live" && job.status === "downloading" ? "Recording" : statusLabel[job.status]}</span>
                     {job.status === "complete" && job.expectedSha256 && <small>SHA-256 verified</small>}</td>
                   <td className="file-size">
                     {job.bytes > 0 || job.transfer || job.status === "complete" ? displaySize(job.bytes) : "—"}
@@ -1161,14 +1275,14 @@ function App() {
                       <button className="icon-button" title="Stop and save recording" aria-label={`Stop and save ${job.filename}`}
                         onClick={() => void jobAction("stop_recording", job.id)}><Square size={16} /></button>
                     )}
-                    {(job.status === "queued" || (job.status === "downloading" && job.format !== "hls_live")) && (
+                    {(!job.removing && ((job.status === "queued" && !job.deferred) || (job.status === "downloading" && job.format !== "hls_live"))) && (
                       <button className="icon-button" title="Pause" aria-label={`Pause ${job.filename}`} onClick={() => void jobAction("pause_download", job.id)}><Pause size={16} /></button>
                     )}
-                    {(job.status === "paused" || job.status === "failed") && (
-                      <button className="icon-button" title={job.status === "paused" ? "Resume" : "Retry"}
-                        aria-label={`${job.status === "paused" ? "Resume" : "Retry"} ${job.filename}`}
+                    {(!job.removing && (job.deferred || job.status === "paused" || job.status === "failed")) && (
+                      <button className="icon-button" title={job.deferred ? "Download now" : job.status === "paused" ? "Resume" : "Retry"}
+                        aria-label={`${job.deferred ? "Download now" : job.status === "paused" ? "Resume" : "Retry"} ${job.filename}`}
                         onClick={() => void jobAction("retry_download", job.id)}>
-                        {job.status === "paused" ? <Play size={16} /> : <RefreshCw size={16} />}
+                        {job.deferred || job.status === "paused" ? <Play size={16} /> : <RefreshCw size={16} />}
                       </button>
                     )}
                     <button className="icon-button" type="button" title="More actions" aria-label={`More actions for ${job.filename}`}
@@ -1205,4 +1319,7 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const launch = new URLSearchParams(window.location.search);
+createRoot(document.getElementById("root")!).render(launch.has("download")
+  ? <SingleDownload draftId={launch.get("job")} initialQueue={launch.get("queue") ?? "default"} />
+  : <App />);

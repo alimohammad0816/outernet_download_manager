@@ -21,6 +21,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::OnceLock,
 };
 use url::Url;
 
@@ -745,8 +746,22 @@ fn iso_duration(value: &str) -> Option<f64> {
     (remaining.is_empty() && duration > 0.0 && duration.is_finite()).then_some(duration)
 }
 
+static ENGINE_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_engine_directory(directory: PathBuf) {
+    let _ = ENGINE_DIRECTORY.set(directory);
+}
+
+fn engine_path(program: &str) -> PathBuf {
+    ENGINE_DIRECTORY
+        .get()
+        .map(|directory| directory.join(format!("{program}{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(program))
+}
+
 fn media_command(program: &str) -> Command {
-    let mut command = Command::new(program);
+    let mut command = Command::new(engine_path(program));
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -761,7 +776,7 @@ fn media_command(program: &str) -> Command {
 
 fn run_mux(ffmpeg: &mut Command, control: &TransferControl) -> Result<(), String> {
     let mut child = ffmpeg.spawn().map_err(|error| {
-        format!("Cannot start FFmpeg. Install ffmpeg and add it to PATH. ({error})")
+        format!("Cannot start the media engine. Repair or reinstall Outernet. ({error})")
     })?;
     let mut diagnostics = child.stderr.take().expect("piped stderr");
     let (status, warnings) = std::thread::scope(|scope| {

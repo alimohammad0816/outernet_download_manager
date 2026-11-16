@@ -26,6 +26,8 @@ enum Request {
         url: String,
         filename: Option<String>,
         length: u64,
+        #[serde(default)]
+        interactive: bool,
     },
     Chunk {
         bytes: String,
@@ -37,6 +39,8 @@ enum Request {
         filename: Option<String>,
         format: Option<Format>,
         max_height: Option<u32>,
+        #[serde(default)]
+        interactive: bool,
     },
 }
 
@@ -93,27 +97,67 @@ pub fn run_host(origin: &str) -> io::Result<()> {
             url,
             filename,
             length,
+            interactive,
         }) => browser_store()
-            .and_then(|store| receive(&store, &url, filename, length, &mut input, &mut output))
-            .map(|()| true),
+            .and_then(|store| {
+                receive(
+                    &store,
+                    &url,
+                    filename,
+                    length,
+                    interactive,
+                    &mut input,
+                    &mut output,
+                )
+            })
+            .map(|id| {
+                if interactive {
+                    Launch::Popup(id)
+                } else {
+                    Launch::Main
+                }
+            }),
         Ok(request) => handle_request(request),
         Err(error) => Err(error),
     };
-    let launch = outcome.as_ref().is_ok_and(|launch| *launch);
     let message = match outcome {
-        Ok(_) => json!({ "ok": true }),
+        Ok(launch) => {
+            let popup = matches!(launch, Launch::Popup(_));
+            let result = launch.start();
+            match result {
+                Ok(()) => json!({ "ok": true, "popup": popup }),
+                Err(error) if popup => {
+                    json!({ "ok": false, "error": format!("Cannot open Outernet: {error}") })
+                }
+                Err(_) => json!({ "ok": true, "popup": false }),
+            }
+        }
         Err(error) => json!({ "ok": false, "error": error }),
     };
-    // Publish a durably queued transfer even if the browser closes its pipe before reading the acknowledgment.
-    let response = write_response(&mut output, &message);
-    if launch {
+    write_response(&mut output, &message)
+}
+
+enum Launch {
+    None,
+    Main,
+    Popup(String),
+}
+
+impl Launch {
+    fn start(self) -> io::Result<()> {
+        let args = match &self {
+            Self::None => return Ok(()),
+            Self::Main => vec![],
+            Self::Popup(id) => vec!["--download-request", id],
+        };
         Command::new(std::env::current_exe()?)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn()
+            .map(|_| ())
     }
-    response
 }
 
 fn browser_store() -> Result<Store, String> {
@@ -128,9 +172,10 @@ fn receive(
     url: &str,
     filename: Option<String>,
     length: u64,
+    interactive: bool,
     mut input: impl Read,
     mut output: impl Write,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut parsed = transfer::parse_url(url)?;
     let filename = download_name(&parsed, filename);
     // The received bytes, rather than a credential-bearing URL, are the retry source.
@@ -203,16 +248,17 @@ fn receive(
             .and_then(|directory| directory.sync_all())
             .map_err(receive_error)?;
     }
-    store.complete_browser_transfer(
+    let id = store.complete_browser_transfer(
         parsed.into(),
         filename,
         settings,
         attempt,
         written,
         format!("{:x}", hash.finalize()),
+        interactive,
     )?;
     let _ = temporary.keep();
-    Ok(())
+    Ok(id)
 }
 
 fn receive_error(error: io::Error) -> String {
@@ -242,19 +288,27 @@ fn write_response(mut output: impl Write, message: &Value) -> io::Result<()> {
     output.flush()
 }
 
-fn handle_request(request: Request) -> Result<bool, String> {
+fn handle_request(request: Request) -> Result<Launch, String> {
     match request {
-        Request::Ping => Ok(false),
+        Request::Ping => Ok(Launch::None),
         Request::Download {
             url,
             filename,
             format,
             max_height,
+            interactive,
         } => {
             let parsed = transfer::parse_url(&url)?;
             let filename = download_name(&parsed, filename);
-            browser_store()?.add_from_browser(parsed.into(), filename, format, max_height)?;
-            Ok(true)
+            let store = browser_store()?;
+            if interactive {
+                store
+                    .prepare_download(parsed.into(), filename, format, max_height)
+                    .map(Launch::Popup)
+            } else {
+                store.add_from_browser(parsed.into(), filename, format, max_height)?;
+                Ok(Launch::Main)
+            }
         }
         _ => Err("Start a browser transfer before sending data.".into()),
     }
@@ -410,7 +464,16 @@ mod tests {
         };
         let url = "https://example.com/session.bin?private=token";
         let mut output = Vec::new();
-        assert!(receive(&store, url, None, 5, input(b"cat").as_slice(), &mut output).is_err());
+        assert!(receive(
+            &store,
+            url,
+            None,
+            5,
+            false,
+            input(b"cat").as_slice(),
+            &mut output
+        )
+        .is_err());
         assert!(store.snapshot().unwrap().jobs.is_empty());
         assert!(fs::read_dir(&settings.working_folder)
             .unwrap()
@@ -422,6 +485,7 @@ mod tests {
             url,
             None,
             5,
+            false,
             input(b"bytes").as_slice(),
             &mut output,
         )
@@ -433,6 +497,48 @@ mod tests {
         assert_eq!(
             fs::read(settings.destination_folder.join("session.bin")).unwrap(),
             b"bytes"
+        );
+
+        let staged_id = receive(
+            &store,
+            url,
+            None,
+            5,
+            true,
+            input(b"staged").as_slice(),
+            &mut output,
+        );
+        assert!(staged_id.is_err());
+        let staged_id = receive(
+            &store,
+            url,
+            None,
+            6,
+            true,
+            input(b"staged").as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        assert!(!store.process_next().unwrap());
+        store
+            .submit_download(
+                Some(&staged_id),
+                String::new(),
+                "session-later.bin".into(),
+                String::new(),
+                crate::store::DEFAULT_QUEUE,
+                settings.destination_folder.clone(),
+                false,
+            )
+            .unwrap();
+        assert!(!store.process_next().unwrap());
+        store
+            .set_queue_running(crate::store::DEFAULT_QUEUE, true)
+            .unwrap();
+        assert!(store.process_next().unwrap());
+        assert_eq!(
+            fs::read(settings.destination_folder.join("session-later.bin")).unwrap(),
+            b"staged"
         );
     }
 }

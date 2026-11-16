@@ -49,6 +49,7 @@ pub enum Priority {
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Status {
+    Draft,
     Queued,
     Downloading,
     Pausing,
@@ -77,6 +78,12 @@ pub struct Job {
     pub expected_sha256: Option<String>,
     pub sha256: Option<String>,
     pub status: Status,
+    #[serde(default)]
+    immediate: bool,
+    #[serde(default)]
+    pub deferred: bool,
+    #[serde(default)]
+    pub removing: bool,
     #[serde(default)]
     pub priority: Priority,
     pub error: Option<String>,
@@ -442,6 +449,9 @@ impl Store {
             expected_sha256,
             sha256: None,
             status: Status::Queued,
+            immediate: false,
+            deferred: false,
+            removing: false,
             priority: Priority::Normal,
             error: None,
             bytes: 0,
@@ -506,6 +516,17 @@ impl Store {
                 .find(|queue| queue.id == id)
                 .ok_or("Download queue not found.")?;
             queue.running = running;
+            for job in state.jobs.iter_mut().filter(|job| job.queue_id == id) {
+                if !running {
+                    job.immediate = false;
+                }
+                if running && job.deferred {
+                    job.deferred = false;
+                    if job.sha256.is_some() {
+                        job.status = Status::Ready;
+                    }
+                }
+            }
             Ok(state
                 .jobs
                 .iter()
@@ -560,18 +581,141 @@ impl Store {
         Ok(job.destination())
     }
 
-    pub fn remove_completed(&self, id: &str) -> Result<(), String> {
+    pub fn remove_download(&self, id: &str) -> Result<(), String> {
+        let workers = self.workers.lock().map_err(db_error)?;
+        if let Some(control) = workers.get(id) {
+            self.update(|state| {
+                let job = state
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.id == id)
+                    .ok_or("Download not found.")?;
+                job.removing = true;
+                Ok(())
+            })?;
+            control.pause();
+            Ok(())
+        } else {
+            self.discard_job(id)
+        }
+    }
+
+    fn discard_job(&self, id: &str) -> Result<(), String> {
         self.update(|state| {
             let index = state
                 .jobs
                 .iter()
                 .position(|job| job.id == id)
                 .ok_or("Download not found.")?;
-            if state.jobs[index].status != Status::Complete {
-                return Err("Only completed downloads can be removed from history.".into());
+            let job = &state.jobs[index];
+            if job.attempt.is_some() {
+                match fs::remove_dir_all(job.working_dir()) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(format!("Cannot remove the working files: {error}")),
+                }
             }
             state.jobs.remove(index);
             Ok(())
+        })
+    }
+
+    fn finish_removal(&self, id: &str) -> Result<(), String> {
+        if let Err(error) = self.discard_job(id) {
+            self.update(|state| {
+                let job = state
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.id == id)
+                    .ok_or("Download not found.")?;
+                job.removing = false;
+                if job.status != Status::Complete {
+                    job.status = Status::Failed;
+                }
+                job.error = Some(error);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn discard_draft(&self, id: &str) -> Result<(), String> {
+        self.update(|state| {
+            state
+                .jobs
+                .retain(|job| job.id != id || job.status != Status::Draft);
+            Ok(())
+        })
+    }
+
+    pub fn prepare_download(
+        &self,
+        url: String,
+        filename: String,
+        format: Option<Format>,
+        max_height: Option<u32>,
+    ) -> Result<String, String> {
+        self.update(|state| {
+            let mut job = Self::new_job(
+                state.settings.clone(),
+                url,
+                filename,
+                String::new(),
+                Some((format, max_height)),
+            )?;
+            job.status = Status::Draft;
+            let id = job.id.clone();
+            state.jobs.insert(0, job);
+            Ok(id)
+        })
+    }
+
+    pub fn submit_download(
+        &self,
+        id: Option<&str>,
+        url: String,
+        filename: String,
+        sha256: String,
+        queue_id: &str,
+        destination: PathBuf,
+        now: bool,
+    ) -> Result<String, String> {
+        let destination = transfer::normalize_folder(destination)?;
+        self.update(|state| {
+            let draft = id
+                .map(|id| {
+                    state
+                        .jobs
+                        .iter()
+                        .find(|job| job.id == id && job.status == Status::Draft)
+                        .cloned()
+                        .ok_or("This download request is no longer available.")
+                })
+                .transpose()?;
+            let mut settings = state.settings.clone();
+            settings.destination_folder = destination;
+            let source = draft.as_ref().map(|job| (Some(job.format), job.max_height));
+            let url = draft.as_ref().map_or(url, |job| job.url.clone());
+            let mut job = Self::new_job(settings, url, filename, sha256, source)?;
+            if let Some(draft) = draft {
+                job.id = draft.id;
+                if draft.sha256.is_some() {
+                    job.settings.working_folder = draft.settings.working_folder;
+                    job.sha256 = draft.sha256;
+                    job.attempt = draft.attempt;
+                    job.bytes = draft.bytes;
+                    if now {
+                        job.status = Status::Ready;
+                    }
+                }
+                state.jobs.retain(|other| other.id != job.id);
+            }
+            job.queue_id = queue_id.to_owned();
+            job.immediate = now;
+            job.deferred = !now;
+            let id = job.id.clone();
+            Self::enqueue(state, job, true)?;
+            Ok(id)
         })
     }
 
@@ -626,13 +770,15 @@ impl Store {
         attempt: String,
         bytes: u64,
         digest: String,
-    ) -> Result<(), String> {
+        interactive: bool,
+    ) -> Result<String, String> {
         self.update(|state| {
+            let id = Uuid::new_v4().to_string();
             let filename = available_name(state, &settings, filename, true)?;
             state.jobs.insert(
                 0,
                 Job {
-                    id: Uuid::new_v4().to_string(),
+                    id: id.clone(),
                     url,
                     filename,
                     settings,
@@ -642,7 +788,14 @@ impl Store {
                     max_height: None,
                     expected_sha256: None,
                     sha256: Some(digest),
-                    status: Status::Ready,
+                    status: if interactive {
+                        Status::Draft
+                    } else {
+                        Status::Ready
+                    },
+                    immediate: false,
+                    deferred: false,
+                    removing: false,
                     priority: Priority::Normal,
                     error: None,
                     bytes,
@@ -650,7 +803,7 @@ impl Store {
                     attempt: Some(attempt),
                 },
             );
-            Ok(())
+            Ok(id)
         })
     }
 
@@ -700,7 +853,9 @@ impl Store {
                 .iter_mut()
                 .find(|job| job.id == id)
                 .ok_or("Download not found.")?;
-            if !matches!(job.status, Status::Failed | Status::Paused) {
+            if job.removing
+                || !(job.deferred || matches!(job.status, Status::Failed | Status::Paused))
+            {
                 return Err("Choose a paused or failed download to continue.".into());
             }
             job.status = if job.sha256.is_some() {
@@ -709,6 +864,8 @@ impl Store {
                 job.bytes = 0;
                 Status::Queued
             };
+            job.immediate |= job.deferred;
+            job.deferred = false;
             job.error = None;
             Ok(())
         })
@@ -779,7 +936,9 @@ impl Store {
             Ok(())
         })?;
         for job in self.snapshot()?.jobs {
-            if job.status == Status::Complete {
+            if job.removing {
+                self.finish_removal(&job.id)?;
+            } else if job.status == Status::Complete && job.attempt.is_some() {
                 let _ = fs::remove_dir_all(job.working_dir());
             }
         }
@@ -817,15 +976,25 @@ impl Store {
             .enumerate()
             .filter(|(_, job)| {
                 !workers.contains_key(&job.id)
+                    && !job.removing
                     && snapshot.queues.iter().any(|queue| {
                         queue.id == job.queue_id
                             && occupied.get(queue.id.as_str()).copied().unwrap_or(0)
                                 < usize::from(queue.slots)
                             && (job.status == Status::Ready
-                                || (queue.running && queue_due && job.status == Status::Queued))
+                                || (job.status == Status::Queued
+                                    && !job.deferred
+                                    && (job.immediate || (queue.running && queue_due))))
                     })
             })
-            .max_by_key(|(index, job)| (job.status == Status::Ready, job.priority, *index));
+            .max_by_key(|(index, job)| {
+                (
+                    job.status == Status::Ready,
+                    job.immediate,
+                    job.priority,
+                    *index,
+                )
+            });
         let Some((_, job)) = next else {
             return Ok(None);
         };
@@ -907,12 +1076,22 @@ impl Store {
     ) -> Result<Option<Job>, String> {
         let outcome = if job.status == Status::Downloading {
             self.transfer(&mut job, &control)
+                .and_then(|()| control.check())
                 .and_then(|()| self.publish(&mut job))
         } else {
             self.publish(&mut job)
         };
         let mut workers = self.workers.lock().map_err(db_error)?;
         workers.remove(&job.id);
+        if self.read()?.is_some_and(|state| {
+            state
+                .jobs
+                .iter()
+                .any(|entry| entry.id == job.id && entry.removing)
+        }) {
+            self.finish_removal(&job.id)?;
+            return Ok(None);
+        }
         if let Err(error) = outcome {
             job.status = if control.is_held_for_queue() {
                 Status::Queued
@@ -1014,7 +1193,11 @@ impl Store {
                 .iter_mut()
                 .find(|entry| entry.id == job.id)
                 .ok_or("Download not found.")?;
+            let removing = entry.removing;
+            let immediate = entry.immediate;
             *entry = job.clone();
+            entry.removing = removing;
+            entry.immediate = immediate;
             Ok(())
         })
     }
@@ -1035,10 +1218,10 @@ fn available_name(
     let is_taken = |name: &str| {
         let destination = settings.destination_folder.join(name);
         destination.exists()
-            || state
-                .jobs
-                .iter()
-                .any(|job| job.status != Status::Complete && job.destination() == destination)
+            || state.jobs.iter().any(|job| {
+                !matches!(job.status, Status::Complete | Status::Draft)
+                    && job.destination() == destination
+            })
     };
     if !is_taken(&filename) {
         return Ok(filename);

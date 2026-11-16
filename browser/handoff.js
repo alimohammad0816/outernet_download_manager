@@ -70,7 +70,7 @@ function nativeSession(api, host) {
   };
 }
 
-export async function receiveWithBrowser(api, host, url, { filename, expected, onReady } = {}) {
+export async function receiveWithBrowser(api, host, url, { filename, expected, onReady, interactive } = {}) {
   const source = new URL(url);
   if (!["http:", "https:"].includes(source.protocol) || source.username || source.password
       || /\.(m3u8|mpd)$/i.test(source.pathname)) {
@@ -123,6 +123,7 @@ export async function receiveWithBrowser(api, host, url, { filename, expected, o
       action: "receive", url: response.url || source.href,
       filename: filename || attachmentName(response.headers.get("content-disposition")),
       length,
+      ...(interactive ? { interactive: true } : {}),
     });
     const packetSize = Number.isInteger(ready.chunk_bytes) && ready.chunk_bytes > 0
       ? Math.min(ready.chunk_bytes, CHUNK_SIZE) : CHUNK_SIZE;
@@ -139,7 +140,7 @@ export async function receiveWithBrowser(api, host, url, { filename, expected, o
       if (part.done) break;
       await sendBytes(part.value);
     }
-    await native.request({ action: "finish" });
+    return await native.request({ action: "finish" });
   } catch (error) {
     if (native) await native.request({ action: "abort" }).catch(() => {});
     throw error;

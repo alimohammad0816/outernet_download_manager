@@ -119,11 +119,6 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .workspace-dialog .dialog-heading .icon-button { align-self: flex-start; color: var(--muted); }
 .workspace-form { gap: 0; }
 .workspace-body { display: grid; gap: 17px; padding: 0 24px 22px; }
-.download-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: #0a0d0f; border: 1px solid #252a2d; border-radius: 10px; }
-.download-mode button { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #aeb7bb; font-weight: 550; }
-.download-mode button:hover { background: #171c1f; }
-.download-mode button[aria-pressed="true"] { border-color: #354240; color: #ebf3f0; background: #222b2b; }
-.download-mode button[aria-pressed="true"] svg { color: var(--accent); }
 .single-fields { display: grid; gap: 13px; }
 .single-fields input { height: 38px; background: #0d1012; border-color: #2a3033; }
 .field-heading { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
@@ -253,7 +248,7 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .queue-header { align-items: center; margin-bottom: 9px; }
 .queue-selector, .queue-actions, .filter-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .filter-actions .picker-menu { inset-inline: auto 0; }
-.filter-actions .picker-menu[data-side="top"] { inset-block: auto calc(100% + 6px); }
+.picker-menu[data-side="top"] { inset-block: auto calc(100% + 6px); }
 .queue-selector .picker-trigger { max-width: min(37vw, 290px); }
 .queue-selector .picker-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 13px; color: var(--muted); font-size: 12px; }
@@ -269,3 +264,11 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
   main { padding-top: 19px; }
   .empty { padding-block: 12px; }
 }
+
+.single-window main { gap: 12px; padding: 18px 22px; }
+.single-window .picker-menu { max-height: 140px; }
+.single-status { overflow-wrap: anywhere; }
+.single-status small { margin: 0; }
+.single-status .download-progress { max-width: none; }
+.single-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-block: 5px; }
+.single-window summary { color: var(--muted); cursor: pointer; }

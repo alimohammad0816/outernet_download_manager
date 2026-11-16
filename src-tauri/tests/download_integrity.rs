@@ -246,6 +246,7 @@ fn schedule_survives_a_restart_and_holds_queued_transfers() {
             "browser-fixture".into(),
             8,
             expected(8, 17),
+            false,
         )
         .unwrap();
     assert!(store.process_next().unwrap());
@@ -635,7 +636,7 @@ fn reuses_only_verified_ranges_after_restart() {
 }
 
 #[test]
-fn only_completed_downloads_can_be_opened_or_removed_from_history() {
+fn only_completed_downloads_can_be_opened_and_completed_files_survive_list_removal() {
     let (_root, _destination, _, settings, store) = setup(None);
     let (url, server) = serve(Response::Complete(1024, 11));
     store
@@ -643,7 +644,6 @@ fn only_completed_downloads_can_be_opened_or_removed_from_history() {
         .unwrap();
     let id = job(&store).id;
     assert!(store.completed_path(&id).is_err());
-    assert!(store.remove_completed(&id).is_err());
     store.process_next().unwrap();
     server
         .join()
@@ -652,7 +652,7 @@ fn only_completed_downloads_can_be_opened_or_removed_from_history() {
     let path = store.completed_path(&id).unwrap();
     assert_eq!(path, settings.destination_folder.join("complete.bin"));
     assert_eq!(std::fs::read(&path).unwrap(), vec![11; 1024]);
-    store.remove_completed(&id).unwrap();
+    store.remove_download(&id).unwrap();
     assert!(store.snapshot().unwrap().jobs.is_empty());
     assert!(path.exists());
 }
@@ -1633,4 +1633,126 @@ fn system_proxy_uses_environment_while_direct_ignores_it() {
     let request = proxy_server.join().unwrap().unwrap();
     assert!(request.starts_with(&format!("GET {origin} HTTP/")));
     assert!(origin_server.join().unwrap().unwrap().starts_with("GET /"));
+}
+
+#[test]
+fn quick_download_honors_destination_and_can_run_now_or_later() {
+    let (root, _destination, _database, _settings, store) = setup(None);
+    let custom = root.path().join("other destination");
+    fs::create_dir(&custom).unwrap();
+    let queue = store.save_queue(None, "Manual".into(), 1, None).unwrap();
+    let (url, server) = serve(Response::CompleteChunked);
+    let id = store
+        .prepare_download(url, "single.bin".into(), None, None)
+        .unwrap();
+    assert!(!store.process_next().unwrap());
+    let discarded = store
+        .prepare_download(
+            "https://example.invalid/cancel".into(),
+            "cancelled.bin".into(),
+            None,
+            None,
+        )
+        .unwrap();
+    store.discard_draft(&discarded).unwrap();
+    assert_eq!(store.snapshot().unwrap().jobs.len(), 1);
+    assert_eq!(
+        store
+            .submit_download(
+                Some(&id),
+                String::new(),
+                "single.bin".into(),
+                String::new(),
+                &queue,
+                custom.clone(),
+                true
+            )
+            .unwrap(),
+        id
+    );
+    assert!(store.process_next().unwrap());
+    assert!(server.join().unwrap().is_some());
+    assert_eq!(fs::read(custom.join("single.bin")).unwrap(), b"example");
+
+    let (url, later) = serve(Response::CompleteChunked);
+    store.set_queue_running(&queue, true).unwrap();
+    let id = store
+        .submit_download(
+            None,
+            url,
+            "later.bin".into(),
+            String::new(),
+            &queue,
+            custom.clone(),
+            false,
+        )
+        .unwrap();
+    assert!(!store.process_next().unwrap());
+    assert!(
+        store
+            .snapshot()
+            .unwrap()
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .unwrap()
+            .deferred
+    );
+    store.set_queue_running(&queue, true).unwrap();
+    assert!(store.process_next().unwrap());
+    assert!(later.join().unwrap().is_some());
+    assert_eq!(fs::read(custom.join("later.bin")).unwrap(), b"example");
+}
+
+#[test]
+fn removing_active_download_waits_for_the_worker_and_preserves_existing_destination_files() {
+    use std::io::Write;
+    let (_root, destination, _database, settings, store) = setup(None);
+    let store = std::sync::Arc::new(store);
+    let (entered, request) = std::sync::mpsc::channel();
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let response_gate = gate.clone();
+    let server = Fixture::start(move |mut stream, raw| {
+        if raw.starts_with("HEAD ") {
+            let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        let _ = entered.send(());
+        let (open, ready) = &*response_gate;
+        let _guard = ready
+            .wait_timeout_while(open.lock().unwrap(), Duration::from_secs(5), |open| !*open)
+            .unwrap();
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata");
+    });
+    store
+        .add(server.url("active"), "active.bin".into(), String::new())
+        .unwrap();
+    assert!(store.start_next(|_| {}).unwrap());
+    request.recv_timeout(Duration::from_secs(5)).unwrap();
+    let id = job(&store).id;
+    store.remove_download(&id).unwrap();
+    assert!(job(&store).removing);
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !store.snapshot().unwrap().jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!destination.path().join("active.bin").exists());
+    assert!(fs::read_dir(settings.working_folder)
+        .unwrap()
+        .next()
+        .is_none());
+
+    store
+        .add(
+            "https://example.invalid/queued".into(),
+            "queued.bin".into(),
+            String::new(),
+        )
+        .unwrap();
+    store.remove_download(&job(&store).id).unwrap();
+    assert!(store.snapshot().unwrap().jobs.is_empty());
 }

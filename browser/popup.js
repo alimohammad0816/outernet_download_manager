@@ -34,7 +34,10 @@ try {
     api.runtime.sendMessage({ action: "streams", tabId: tab.id, pageUrl: tab.url }),
   ]);
   const error = connection.ok ? data?.result?.error : connection.error;
-  showStatus(error || (data?.result?.pending ? "Receiving through your browser…" : "Desktop app connected"),
+  const result = data?.result;
+  const connectionText = result?.pending ? "Receiving through your browser…"
+    : result?.ok ? result.popup ? "Opening download window…" : "Added to Outernet" : "Desktop app connected";
+  showStatus(error || connectionText,
     error ? "error" : data?.result?.pending ? "checking" : "connected");
   if (!data?.streams?.length) {
     document.querySelector("#hint").textContent = "Start playing a video to detect its source, or right-click a link to download it.";
@@ -54,7 +57,7 @@ try {
         button.disabled = true;
         try {
           const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, format, maxHeight: selectedHeight });
-          showStatus(result.ok ? "Added to Outernet" : result.error, result.ok ? "connected" : "error");
+          showStatus(result.ok ? (result.popup ? "Opening download window…" : "Added to Outernet") : result.error, result.ok ? "connected" : "error");
         } catch {
           showStatus("Could not send this download.", "error");
         } finally {

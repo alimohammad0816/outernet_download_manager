@@ -14,7 +14,7 @@ use store::{DailyWindow, Priority, Settings, Snapshot, Store};
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WindowEvent,
+    AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 
@@ -132,8 +132,8 @@ async fn open_download(
 }
 
 #[tauri::command]
-async fn remove_completed_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
-    store.remove_completed(&id)
+async fn remove_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
+    store.remove_download(&id)
 }
 
 #[tauri::command]
@@ -366,6 +366,88 @@ async fn install_update(
     .map_err(|error| error.to_string())?
 }
 
+fn download_window(app: &AppHandle, id: Option<&str>, queue_id: &str) -> Result<(), String> {
+    if id.is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+        || (queue_id != store::DEFAULT_QUEUE && uuid::Uuid::parse_str(queue_id).is_err())
+    {
+        return Err("Invalid download request.".into());
+    }
+    let label = format!(
+        "download-{}",
+        id.map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    );
+    if let Some(window) = app.get_webview_window(&label) {
+        return window.set_focus().map_err(|error| error.to_string());
+    }
+    let mut url = format!("index.html?download=1&queue={queue_id}");
+    if let Some(id) = id {
+        url.push_str(&format!("&job={id}"));
+    }
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        .title("Outernet · Download")
+        .inner_size(520.0, 490.0)
+        .min_inner_size(440.0, 370.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .maximizable(false)
+        .center()
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_download_window(app: AppHandle, queue_id: String) -> Result<(), String> {
+    download_window(&app, None, &queue_id)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadChoice {
+    id: Option<String>,
+    url: String,
+    filename: String,
+    sha256: String,
+    queue_id: String,
+    destination: std::path::PathBuf,
+    now: bool,
+}
+
+#[tauri::command]
+async fn submit_single_download(
+    store: State<'_, Arc<Store>>,
+    choice: DownloadChoice,
+) -> Result<String, String> {
+    store.submit_download(
+        choice.id.as_deref(),
+        choice.url,
+        choice.filename,
+        choice.sha256,
+        &choice.queue_id,
+        choice.destination,
+        choice.now,
+    )
+}
+
+fn browser_popup_id(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find_map(|pair| (pair[0] == "--download-request").then_some(pair[1].as_str()))
+}
+
+fn show_browser_popup(app: &AppHandle, id: &str) {
+    let app = app.clone();
+    let id = id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = download_window(&app, Some(&id), store::DEFAULT_QUEUE) {
+            eprintln!("{error}");
+            let _ = app.state::<Arc<Store>>().discard_draft(&id);
+            show_main(&app);
+        }
+    });
+}
+
 fn main() {
     if let Some(origin) = browser::launch_origin(std::env::args_os().skip(1)) {
         if let Err(error) = browser::run_host(&origin) {
@@ -374,21 +456,34 @@ fn main() {
         return;
     }
     let builder =
-        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            show_main(app)
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if let Some(id) = browser_popup_id(&args) {
+                show_browser_popup(app, id);
+            } else {
+                show_main(app);
+            }
         }));
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
+            if let WindowEvent::Destroyed = event {
+                if let Some(id) = window.label().strip_prefix("download-") {
+                    let _ = window.app_handle().state::<Arc<Store>>().discard_draft(id);
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 if window.label() == "main"
-                    && app.tray_by_id(TRAY_ID).is_some()
-                    && app
-                        .state::<Arc<Store>>()
-                        .current_settings()
-                        .is_ok_and(|settings| settings.keep_running)
+                    && (app
+                        .webview_windows()
+                        .keys()
+                        .any(|label| label.starts_with("download-"))
+                        || (app.tray_by_id(TRAY_ID).is_some()
+                            && app
+                                .state::<Arc<Store>>()
+                                .current_settings()
+                                .is_ok_and(|settings| settings.keep_running)))
                     && window.hide().is_ok()
                 {
                     api.prevent_close();
@@ -400,10 +495,19 @@ fn main() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
+            if let Ok(resources) = app.path().resource_dir() {
+                media::set_engine_directory(resources.join("engines"));
+            }
             let data = app.path().app_local_data_dir()?;
             let store = Arc::new(open_store(&data)?);
             store.recover().map_err(io::Error::other)?;
             app.manage(Arc::clone(&store));
+            let args: Vec<_> = std::env::args().collect();
+            if let Some(id) = browser_popup_id(&args) {
+                show_browser_popup(app.handle(), id);
+            } else {
+                show_main(app.handle());
+            }
             if let Err(error) = install_tray(app.handle()) {
                 eprintln!("System tray unavailable: {error}");
             }
@@ -438,6 +542,8 @@ fn main() {
             snapshot,
             save_settings,
             add_download,
+            show_download_window,
+            submit_single_download,
             add_download_batch,
             list_network_interfaces,
             save_download_queue,
@@ -446,7 +552,7 @@ fn main() {
             replace_download_link,
             retry_download,
             open_download,
-            remove_completed_download,
+            remove_download,
             pause_download,
             stop_recording,
             connect_browser,
