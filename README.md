@@ -3,6 +3,12 @@
 Outernet downloads HTTP(S) files and supported on-demand video streams on Linux
 and Windows. Its local queue, settings, and history use SQLite.
 
+## Screenshots
+
+![Outernet desktop queue with an active, a queued, and a completed download](docs/screenshots/downloads.png)
+
+![Browser extension connected to Outernet with stream quality and HLS download controls](docs/screenshots/browser-extension.png)
+
 ## Install and run
 
 Get the x86-64 desktop installer and browser extension from the
