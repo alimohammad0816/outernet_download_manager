@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, CalendarClock, Check, CircleAlert, FolderOpen, Globe, HardDrive, Link, List, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { ArrowDownToLine, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, FolderOpen, Globe, HardDrive, ListFilter, Layers, Link, List, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -111,17 +111,25 @@ function suggestedName(input: string) {
   }
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Modal({ title, onClose, children, className, description, mark }: {
+  title: string; onClose: () => void; children: ReactNode; className?: string; description?: string; mark?: ReactNode;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     dialog.current?.showModal();
-    dialog.current?.querySelector<HTMLInputElement>("[data-initial-focus]")?.focus();
+    dialog.current?.querySelector<HTMLElement>("[data-initial-focus]")?.focus();
   }, []);
 
   return (
-    <dialog ref={dialog} aria-labelledby="dialog-title" onClose={onClose}>
+    <dialog ref={dialog} className={className} aria-labelledby="dialog-title"
+      aria-describedby={description ? "dialog-description" : undefined} onClose={onClose}>
       <div className="dialog-heading">
-        <h2 id="dialog-title">{title}</h2>
+        <div className="dialog-title-group">
+          {description && <span className="dialog-mark">{mark ?? <ArrowDownToLine size={20} />}</span>}
+          <div><h2 id="dialog-title">{title}</h2>
+            {description && <p id="dialog-description">{description}</p>}
+          </div>
+        </div>
         <button className="icon-button" aria-label="Close" onClick={() => dialog.current?.close()}><X size={18} /></button>
       </div>
       {children}
@@ -150,14 +158,35 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const entries = links.split(/\r?\n/).flatMap((value, index) => {
+    const url = value.trim();
+    if (!url) return [];
+    try {
+      const parsed = new URL(url);
+      const valid = ["https:", "http:"].includes(parsed.protocol) && !parsed.username && !parsed.password;
+      return [{ url, line: index + 1, valid, filename: suggestedName(url) || "download" }];
+    } catch {
+      return [{ url, line: index + 1, valid: false, filename: "" }];
+    }
+  });
+  const invalid = entries.find(entry => !entry.valid);
+  const issue = entries.length > 500 ? "Add up to 500 links at a time."
+    : invalid ? `Line ${invalid.line} needs a valid HTTP or HTTPS link.` : "";
+  const linkCount = entries.length === 1 ? "1 link" : `${entries.length} links`;
+
+  function changeMode(multiple: boolean) {
+    setBatch(multiple);
+    setError("");
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (busy || (batch && (!entries.length || issue))) return;
     setBusy(true);
     setError("");
     try {
       if (batch) {
-        const entries = links.split(/\r?\n/).map(link => link.trim()).filter(Boolean);
-        await invoke("add_download_batch", { links: entries.map(link => [link, suggestedName(link) || "download"]) });
+        await invoke("add_download_batch", { links: entries.map(entry => [entry.url, entry.filename]) });
       } else {
         await invoke("add_download", { url, filename: filename ?? suggestedName(url), sha256 });
       }
@@ -171,16 +200,48 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
   }
 
   return (
-    <Modal title="New download" onClose={onClose}>
-      <form onSubmit={submit}>
-        <label className="checkbox"><input type="checkbox" checked={batch} onChange={event => { setBatch(event.target.checked); setError(""); }} /> Add multiple links</label>
-        {batch ? <label>Download URLs <span>One link per line</span><textarea rows={7}
-          value={links} onChange={event => setLinks(event.target.value)} spellCheck={false} required /></label> : <>
-        <label>Download URL<input data-initial-focus type="url" placeholder="https://example.com/file.zip" value={url} onChange={event => setUrl(event.target.value)} required /></label>
-        <label>Filename<input value={filename ?? suggestedName(url)} onChange={event => setFilename(event.target.value)} required /></label>
-        <label>Expected SHA-256 <span>Optional</span><input spellCheck={false} autoComplete="off" value={sha256} onChange={event => setSha256(event.target.value)} placeholder="Checksum provided by the publisher" /></label>
-        </>}
-        <FormActions busy={busy} error={error} onClose={onClose} label={batch ? "Add downloads" : "Add download"} />
+    <Modal title="Add download" description="Add links to your download queue." className="add-dialog" onClose={onClose}>
+      <form className="add-form" onSubmit={submit}>
+        <div className="add-body">
+          <div className="download-mode" role="group" aria-label="Download mode">
+            <button type="button" aria-pressed={!batch} disabled={busy} onClick={() => changeMode(false)}><Link size={15} /> Single link</button>
+            <button type="button" aria-pressed={batch} disabled={busy} onClick={() => changeMode(true)}><Layers size={15} /> Multiple links</button>
+          </div>
+          {batch ? (
+            <div className="batch-field">
+              <div className="field-heading"><label htmlFor="batch-links">Download links</label><span id="batch-hint">One link per line</span></div>
+              <div className="link-editor">
+                <textarea id="batch-links" rows={5} value={links}
+                  onChange={event => { setLinks(event.target.value); setError(""); }}
+                  placeholder={"https://example.com/report.pdf\nhttps://example.com/archive.zip"}
+                  spellCheck={false} autoComplete="off" aria-invalid={!!issue} aria-describedby="batch-hint batch-feedback" />
+                <div className="editor-info" id="batch-feedback" aria-live="polite">
+                  <span className={issue ? "error" : undefined}>{issue || (entries.length ? `${linkCount} detected` : "Paste links from your clipboard")}</span>
+                  <span>{entries.length} / 500</span>
+                </div>
+              </div>
+              {entries.length > 0 && !issue && (
+                <ul className="link-preview" aria-label="Files to queue">
+                  {entries.slice(0, 2).map(entry => <li key={entry.line}><ArrowDownToLine size={14} /><span title={entry.filename}>{entry.filename}</span></li>)}
+                  {entries.length > 2 && <li className="preview-more">+{entries.length - 2} more</li>}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <div className="single-fields">
+              <label>Download link<input data-initial-focus type="url" placeholder="https://example.com/file.zip" value={url} onChange={event => setUrl(event.target.value)} required /></label>
+              <label>Filename<input value={filename ?? suggestedName(url)} onChange={event => setFilename(event.target.value)} required /></label>
+              <label>SHA-256 <span>Optional</span><input spellCheck={false} autoComplete="off" value={sha256} onChange={event => setSha256(event.target.value)} placeholder="Publisher checksum" /></label>
+            </div>
+          )}
+          {error && <p className="error" role="alert">{error}</p>}
+        </div>
+        <div className="add-footer">
+          <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="button queue-submit" disabled={busy || (batch ? !entries.length || !!issue : !url.trim())}>
+            <ArrowDownToLine size={16} />{busy ? "Queuing…" : batch && entries.length ? `Queue ${linkCount}` : "Add to queue"}
+          </button>
+        </div>
       </form>
     </Modal>
   );
@@ -386,10 +447,122 @@ function toMinutes(clock: string) {
   return hours * 60 + minutes;
 }
 
+function CategoryPicker({ value, onChange }: { value: string; onChange: (category: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  useEffect(() => {
+    if (!expanded) return;
+    function dismiss(event: PointerEvent) {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setExpanded(false);
+    }
+    window.addEventListener("pointerdown", dismiss);
+    return () => window.removeEventListener("pointerdown", dismiss);
+  }, [expanded]);
+  return (
+    <div className="category-picker" ref={root} onBlur={event => {
+      if (!event.currentTarget.contains(event.relatedTarget)) setExpanded(false);
+    }} onKeyDown={event => {
+      if (event.key === "Escape" && expanded) {
+        setExpanded(false);
+        trigger.current?.focus();
+      }
+    }}>
+      <button className="picker-trigger" type="button" ref={trigger} aria-expanded={expanded} aria-controls={id}
+        aria-label={`File type: ${value || "All types"}`} onClick={() => setExpanded(!expanded)}>
+        <ListFilter size={15} /><span>{value || "All types"}</span><ChevronDown size={14} />
+      </button>
+      {expanded && <div className="picker-menu" id={id} role="group" aria-label="File type">
+        {["", ...Object.keys(categories), "Other"].map(category => (
+          <button type="button" key={category} aria-pressed={category === value} onClick={() => {
+            onChange(category);
+            setExpanded(false);
+            trigger.current?.focus();
+          }}>{category || "All types"}{category === value && <Check size={15} />}</button>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
+const monthLabel = new Intl.DateTimeFormat("en", { month: "long", year: "numeric" });
+const dateLabel = new Intl.DateTimeFormat("en", { dateStyle: "medium" });
+const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function DatePicker({ value, onChange }: { value: string; onChange: (day: string) => void }) {
+  const initial = value ? new Date(`${value}T12:00`) : new Date();
+  const [month, setMonth] = useState(() => new Date(initial.getFullYear(), initial.getMonth(), 1));
+  const [expanded, setExpanded] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  const today = toLocalTime(Date.now()).slice(0, 10);
+  const start = month.getDay();
+  const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+
+  function select(day: string) {
+    onChange(day);
+    setExpanded(false);
+    trigger.current?.focus();
+  }
+
+  function shift(amount: number) {
+    setMonth(current => new Date(current.getFullYear(), current.getMonth() + amount, 1));
+  }
+
+  return (
+    <div className="date-picker" onKeyDown={event => {
+      if (event.key === "Escape" && expanded) {
+        event.preventDefault();
+        setExpanded(false);
+        trigger.current?.focus();
+      }
+    }}>
+      <span className="date-field-label">Date</span>
+      <button type="button" className="picker-trigger" data-initial-focus ref={trigger} aria-expanded={expanded} aria-controls={id}
+        aria-label={value ? `Hold date: ${dateLabel.format(initial)}` : "Choose hold date"} onClick={() => setExpanded(!expanded)}>
+        <CalendarClock size={16} /><span>{value ? dateLabel.format(initial) : "Choose date"}</span><ChevronDown size={14} />
+      </button>
+      {expanded && <div className="calendar-panel" id={id} role="group" aria-label="Choose date">
+        <div className="calendar-nav">
+          <button type="button" className="icon-button" onClick={() => shift(-1)} aria-label="Previous month"><ChevronLeft size={16} /></button>
+          <strong aria-live="polite">{monthLabel.format(month)}</strong>
+          <button type="button" className="icon-button" onClick={() => shift(1)} aria-label="Next month"><ChevronRight size={16} /></button>
+        </div>
+        <div className="calendar-grid">
+          {weekdays.map(day => <span key={day}>{day}</span>)}
+          {Array.from({ length: start }, (_, index) => <span key={`empty-${index}`} aria-hidden="true" />)}
+          {Array.from({ length: days }, (_, index) => {
+            const day = new Date(month.getFullYear(), month.getMonth(), index + 1, 12);
+            const key = toLocalTime(day.getTime()).slice(0, 10);
+            return <button key={key} type="button" disabled={key < today} aria-pressed={value === key}
+              aria-current={key === today ? "date" : undefined} aria-label={dateLabel.format(day)}
+              onClick={() => select(key)}>{day.getDate()}</button>;
+          })}
+        </div>
+        <button type="button" className="calendar-today" onClick={() => select(today)}>Today</button>
+      </div>}
+    </div>
+  );
+}
+
+function ClockField({ label, value, onChange }: { label: string; value: string; onChange: (clock: string) => void }) {
+  return <label className="clock-field">{label}<span className="clock-input">
+    <Clock size={15} /><input type="text" inputMode="numeric" maxLength={5} autoComplete="off" placeholder="HH:MM" value={value}
+      onChange={event => {
+        const input = event.target.value;
+        const digits = input.replace(/\D/g, "").slice(0, 4);
+        onChange(digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : input.endsWith(":") && digits.length === 2 ? `${digits}:` : digits);
+      }} />
+  </span></label>;
+}
+
 function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
   runAfter: number | null; dailyWindow: DailyWindow | null; onClose: () => void; onSave: () => Promise<void>;
 }) {
-  const [date, setDate] = useState(runAfter && runAfter > Date.now() ? toLocalTime(runAfter) : "");
+  const initial = runAfter && runAfter > Date.now() ? toLocalTime(runAfter) : "";
+  const [date, setDate] = useState(initial.slice(0, 10));
+  const [time, setTime] = useState(initial.slice(11));
   const [start, setStart] = useState(dailyWindow ? formatTime(dailyWindow.startMinute) : "");
   const [end, setEnd] = useState(dailyWindow ? formatTime(dailyWindow.endMinute) : "");
   const [busy, setBusy] = useState(false);
@@ -399,9 +572,18 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
     setBusy(true);
     setError("");
     try {
-      const epoch = !clear && date ? new Date(date).getTime() : null;
-      if (epoch !== null && (!Number.isFinite(epoch) || epoch <= Date.now())) throw new Error("Choose a future start time.");
-      if (!clear && Boolean(start) !== Boolean(end)) throw new Error("Choose both daily times.");
+      const validClock = /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/;
+      if (!clear && (Boolean(date) !== Boolean(time) || (time && !validClock.test(time)))) {
+        throw new Error("Choose a hold date and enter a time in 24-hour format.");
+      }
+      const local = `${date}T${time}`;
+      const epoch = !clear && date ? new Date(local).getTime() : null;
+      if (epoch !== null && (!Number.isFinite(epoch) || epoch <= Date.now() || toLocalTime(epoch) !== local)) {
+        throw new Error("Choose a valid future local time.");
+      }
+      if (!clear && (start || end) && (!validClock.test(start) || !validClock.test(end))) {
+        throw new Error("Enter both daily times in 24-hour format.");
+      }
       const window = !clear && start && end ? { startMinute: toMinutes(start), endMinute: toMinutes(end) } : null;
       await invoke("schedule_queue", { runAfter: epoch, dailyWindow: window });
       await onSave();
@@ -414,17 +596,35 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
   }
 
   return (
-    <Modal title="Queue schedule" onClose={onClose}>
-      <form onSubmit={event => { event.preventDefault(); void save(); }}>
-        <p className="muted">Set when new queued transfers can start. Keep Outernet running to start them on schedule.</p>
-        <label>Hold until <span>Optional</span><input type="datetime-local" data-initial-focus value={date} onChange={event => setDate(event.target.value)} /></label>
-        <div className="schedule-times">
-          <label>Daily start<input type="time" value={start} onChange={event => setStart(event.target.value)} /></label>
-          <label>Daily end<input type="time" value={end} onChange={event => setEnd(event.target.value)} /></label>
+    <Modal title="Queue schedule" description="Choose when queued downloads can start." className="add-dialog schedule-dialog"
+      mark={<CalendarClock size={20} />} onClose={onClose}>
+      <form className="add-form" onSubmit={event => { event.preventDefault(); void save(); }}>
+        <div className="add-body schedule-body">
+          <section className="schedule-card">
+            <div className="schedule-card-title"><h3>Hold until</h3>
+              {(date || time) && <button type="button" className="quiet-button" onClick={() => { setDate(""); setTime(""); }}>Remove hold</button>}
+            </div>
+            <div className="schedule-hold">
+              <DatePicker value={date} onChange={setDate} />
+              <ClockField label="Time" value={time} onChange={setTime} />
+            </div>
+          </section>
+          <section className="schedule-card">
+            <div className="schedule-card-title"><h3>Daily download window</h3></div>
+            <div className="schedule-times">
+              <ClockField label="Start" value={start} onChange={setStart} />
+              <ClockField label="End" value={end} onChange={setEnd} />
+            </div>
+            <p className="schedule-hint">Leave both times blank to allow downloads all day. Times use your device’s time zone.</p>
+          </section>
+          {error && <p className="error" role="alert">{error}</p>}
         </div>
-        <small>Leave both daily times blank for all-day downloads.</small>
-        <button type="button" className="button secondary" disabled={busy} onClick={() => void save(true)}>Clear schedule</button>
-        <FormActions busy={busy} error={error} onClose={onClose} label="Save schedule" />
+        <div className="add-footer">
+          {(runAfter || dailyWindow) && <button type="button" className="quiet-button clear-schedule" disabled={busy}
+            onClick={() => void save(true)}>Clear schedule</button>}
+          <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="button queue-submit" disabled={busy}><Check size={16} />{busy ? "Saving…" : "Save schedule"}</button>
+        </div>
       </form>
     </Modal>
   );
@@ -533,12 +733,7 @@ function App() {
           <div><dt>Queued</dt><dd>{queued}</dd></div>
           <div><dt>Download speed</dt><dd className={transferRate > 0 ? "receiving" : undefined}>{displaySize(transferRate)}/s</dd></div>
         </dl>}
-        <div className="category-filter"><label htmlFor="file-category">File type</label>
-          <select id="file-category" value={category} onChange={event => setCategory(event.target.value)}>
-            <option value="">All types</option>
-            {[...Object.keys(categories), "Other"].map(type => <option key={type}>{type}</option>)}
-          </select>
-        </div>
+        <div className="category-filter"><CategoryPicker value={category} onChange={setCategory} /></div>
         <section className="download-list" aria-label={heading}>
           <table>
             <thead><tr><th>File</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>

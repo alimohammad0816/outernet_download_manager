@@ -76,8 +76,9 @@ server window advances past a missing segment. The output is Matroska
 
 ## Manage downloads
 
-In **Add download**, enable **Add multiple links** and paste one URL per line
-(up to 500). Outernet validates the batch before committing it to the queue.
+In **Add download**, select **Multiple links** and paste one URL per line
+(up to 500). Check the file preview, then queue the links. Outernet validates
+the batch before committing it to the queue.
 Existing and conflicting filenames receive a numbered suffix. Use **File type**
 to filter downloads by filename extension.
 

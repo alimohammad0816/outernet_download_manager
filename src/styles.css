@@ -108,7 +108,7 @@ dialog { max-height: calc(100vh - 32px); overflow: auto; }
 .schedule-times { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .schedule-notice + .schedule-notice { margin-left: 6px; }
 .priority-control { display: flex; width: fit-content; margin-top: 4px; align-items: center; gap: 6px; font-size: .8rem; color: var(--muted); }
-.category-filter select, .priority-control select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+.priority-control select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
 
 .category-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
@@ -119,3 +119,76 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .queue-summary dt { color: var(--muted); font-size: 12px; }
 .queue-summary dd { margin: 3px 0 0; font: 600 14px/1.45 "IBM Plex Mono", ui-monospace, monospace; }
 .queue-summary .receiving { color: var(--accent); }
+
+.add-dialog { width: min(calc(100vw - 40px), 570px); padding: 0; border-color: #343a3b; border-radius: 16px; background: #111416; box-shadow: 0 28px 90px #0009; }
+.add-dialog::backdrop { background: #07090be0; backdrop-filter: blur(3px); }
+.add-dialog .dialog-heading { margin: 0; padding: 22px 24px 17px; gap: 12px; }
+.dialog-title-group { display: flex; align-items: center; gap: 13px; }
+.dialog-mark { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border: 1px solid #2b4741; border-radius: 11px; color: var(--accent); background: #182925; }
+.add-dialog h2 { font-size: 19px; font-weight: 650; letter-spacing: -.03em; }
+.add-dialog #dialog-description { margin-top: 1px; color: var(--muted); }
+.add-dialog .dialog-heading .icon-button { align-self: flex-start; color: var(--muted); }
+.add-form { gap: 0; }
+.add-body { display: grid; gap: 17px; padding: 0 24px 22px; }
+.download-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: #0a0d0f; border: 1px solid #252a2d; border-radius: 10px; }
+.download-mode button { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #aeb7bb; font-weight: 550; }
+.download-mode button:hover { background: #171c1f; }
+.download-mode button[aria-pressed="true"] { border-color: #354240; color: #ebf3f0; background: #222b2b; }
+.download-mode button[aria-pressed="true"] svg { color: var(--accent); }
+.single-fields { display: grid; gap: 13px; }
+.single-fields input { height: 38px; background: #0d1012; border-color: #2a3033; }
+.field-heading { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.field-heading span { color: var(--muted); }
+.link-editor { background: #0c0f11; border: 1px solid #30373b; border-radius: 10px; }
+.link-editor:focus-within { border-color: #548273; box-shadow: 0 0 0 2px #59dbb81a; }
+.link-editor textarea { display: block; min-height: 110px; max-height: 40vh; padding: 12px 13px; border: 0; border-radius: 10px 10px 0 0; outline: none; background: transparent; font: 12px/1.75 "IBM Plex Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
+.link-editor textarea:focus-visible { outline: none; }
+.link-editor textarea::placeholder { color: #808a90; opacity: 1; }
+.editor-info { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 12px; border-top: 1px solid #252a2d; color: #aab3b7; font-size: 12px; }
+.editor-info span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+.link-preview { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.link-preview li { min-width: 0; max-width: 100%; display: flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid #2a3033; border-radius: 6px; color: #c3cecf; background: #171d20; font-size: 12px; }
+.link-preview svg { flex: none; color: var(--accent); }
+.link-preview span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.link-preview .preview-more { color: var(--muted); }
+.add-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 24px; border-top: 1px solid #282e31; background: #151a1c; }
+.add-footer .button { min-height: 37px; }
+.queue-submit { padding-inline: 14px; background: #a5efd8; color: #12271f; }
+.queue-submit:hover:not(:disabled) { background: #c5f8e8; }
+
+.category-picker { position: relative; }
+.picker-trigger { display: flex; align-items: center; gap: 8px; min-height: 35px; padding: 0 11px; border: 1px solid #30373b; border-radius: 8px; background: #14191b; color: #e6edef; text-align: left; }
+.picker-trigger svg { flex: none; color: #a7b7b7; }
+.picker-trigger span { flex: 1; }
+.picker-trigger:hover, .picker-trigger[aria-expanded="true"] { background: #212a2a; border-color: #3d5550; }
+.picker-menu { position: absolute; z-index: 5; inset: calc(100% + 6px) auto auto 0; min-width: 174px; padding: 4px; border: 1px solid #34403f; border-radius: 10px; background: #171c1e; box-shadow: 0 14px 36px #0008; }
+.picker-menu button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 32px; gap: 12px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; text-align: left; color: #c8d2d3; }
+.picker-menu button:hover { background: #222b2d; }
+.picker-menu button[aria-pressed="true"] { background: #24332e; color: #adf0d9; }
+.schedule-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+.schedule-dialog .add-form { display: flex; flex-direction: column; min-height: 0; }
+.schedule-body { gap: 13px; overflow: auto; }
+.schedule-dialog .add-footer { flex: none; }
+.schedule-card { display: grid; gap: 10px; padding: 12px; border: 1px solid #2b3436; border-radius: 10px; background: #13181a; }
+.schedule-card-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.schedule-card h3 { font-size: 13px; margin: 0; font-weight: 650; }
+.schedule-hold { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 10px; align-items: start; }
+.date-field-label { display: block; margin-bottom: 3px; color: #c2cece; font-size: 12px; font-weight: 600; }
+.date-picker .picker-trigger { width: 100%; }
+.clock-field { min-width: 0; color: #c2cece; font-size: 12px; }
+.clock-input { display: flex; position: relative; align-items: center; margin-top: 3px; }
+.clock-input > svg { position: absolute; left: 9px; color: #9aacad; pointer-events: none; }
+.clock-input input { height: 35px; margin: 0; padding-left: 31px; font-family: "IBM Plex Mono", ui-monospace, monospace; background: #0d1113; border-color: #30373b; }
+.schedule-hint { color: var(--muted); font-size: 12px; }
+.quiet-button { color: #a9c7bd; background: transparent; border: 0; padding: 0 2px; font-size: 12px; }
+.quiet-button:hover { color: #c8f8e9; text-decoration: underline; }
+.clear-schedule { margin-right: auto; }
+.calendar-panel { margin-top: 7px; padding: 7px; border: 1px solid #354340; border-radius: 9px; background: #0d1315; }
+.calendar-nav { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.calendar-nav .icon-button { height: 26px; width: 26px; }
+.calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; padding: 4px 0; }
+.calendar-grid span { text-align: center; color: #a5b1b2; font-size: 10px; }
+.calendar-grid button { padding: 0; min-height: 26px; border-radius: 5px; border: 1px solid transparent; background: transparent; font-size: 12px; }
+.calendar-grid button:hover:not(:disabled), .calendar-grid button[aria-pressed="true"] { background: #253c34; color: #b7f4dc; }
+.calendar-grid button[aria-current="date"] { border-color: #4b7565; }
+.calendar-today { display: block; width: 100%; padding: 4px; border: 0; border-radius: 5px; background: #1b2926; color: #b7f4dc; }
