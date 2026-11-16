@@ -481,6 +481,9 @@ function App() {
   }
 
   const jobs = state?.jobs ?? [];
+  const activeJobs = jobs.filter(job => job.status === "downloading");
+  const transferRate = activeJobs.reduce((total, job) => total + (job.transfer?.bytesPerSecond ?? 0), 0);
+  const queued = jobs.filter(job => job.status === "queued").length;
   const visible = jobs.filter(job => (filter === "all" || job.status === filter) && (!category || fileCategory(job.filename) === category));
   const heading = filters.find(item => item.key === filter)?.label;
   const hostname = (url: string) => new URL(url).hostname;
@@ -488,8 +491,14 @@ function App() {
 
   return (
     <div className="layout">
+      <header className="app-header">
+        <div className="brand"><img className="brand-icon" src="/outernet.svg" width={29} height={29} alt="" /> Outernet</div>
+        <div className="app-actions">
+          <button className="icon-button" title="Browser integration" aria-label="Browser integration" onClick={() => setPanel("browser")}><Globe size={17} /></button>
+          <button className="icon-button" title="Settings" aria-label="Settings" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /></button>
+        </div>
+      </header>
       <aside className="sidebar">
-        <div className="brand"><img className="brand-icon" src="/outernet.svg" width={34} height={34} alt="" /> Outernet</div>
         <nav aria-label="Download filters">
           {filters.map(({ icon: Icon, label, key }) => (
             <button key={key} className={filter === key ? "nav-button selected" : "nav-button"} aria-pressed={filter === key} onClick={() => setFilter(key)}>
@@ -500,12 +509,10 @@ function App() {
         </nav>
         <div className="sidebar-tools">
         <button className="nav-button" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /> Queue schedule</button>
-        <button className="nav-button" onClick={() => setPanel("browser")}><Globe size={17} /> Browser integration</button>
-        <button className="nav-button" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /> Settings</button>
         </div>
       </aside>
       <main>
-        <header>
+        <header className="queue-header">
           <h1>{heading}</h1>
           <button className="button primary" disabled={!state} onClick={() => setPanel("add")}><Plus size={17} /> Add download</button>
         </header>
@@ -521,6 +528,11 @@ function App() {
             <CalendarClock size={16} /> Daily queue window {formatTime(state.daily_window.startMinute)}–{formatTime(state.daily_window.endMinute)}
           </button>
         )}
+        {state && <dl className="queue-summary" aria-label="Queue summary">
+          <div><dt>Active</dt><dd>{activeJobs.length}</dd></div>
+          <div><dt>Queued</dt><dd>{queued}</dd></div>
+          <div><dt>Download speed</dt><dd className={transferRate > 0 ? "receiving" : undefined}>{displaySize(transferRate)}/s</dd></div>
+        </dl>}
         <div className="category-filter"><label htmlFor="file-category">File type</label>
           <select id="file-category" value={category} onChange={event => setCategory(event.target.value)}>
             <option value="">All types</option>
@@ -555,7 +567,7 @@ function App() {
                     {job.bytes > 0 || job.transfer || job.status === "complete" ? displaySize(job.bytes) : "—"}
                     {job.transfer?.totalBytes != null && <small>of {displaySize(job.transfer.totalBytes)}</small>}
                   </td>
-                  <td>
+                  <td className="row-actions">
                     {job.status === "downloading" && job.format === "hls_live" && (
                       <button className="icon-button" title="Stop and save recording" aria-label={`Stop and save ${job.filename}`}
                         onClick={() => void jobAction("stop_recording", job.id)}><Square size={16} /></button>

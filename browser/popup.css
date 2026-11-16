@@ -1,13 +1,16 @@
-:root { color-scheme: light dark; font: 13px/1.4 system-ui,sans-serif; }
+:root { color-scheme: dark; background: #0b0c0d; color: #f1f2f3; font: 13px/1.4 system-ui,sans-serif; }
 body { width: 290px; margin: 0; padding: 14px; }
 header { display: flex; gap: 8px; align-items: center; }
 h1 { margin: 0; font-size: 16px; }
 p { margin: 10px 0; overflow-wrap: anywhere; }
-#hint { opacity: .75; }
+#hint { color: #a0a4aa; }
 ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
-button { width: 100%; text-align: left; padding: 7px; border: 1px solid #7778; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-button:hover { background: #8882; }
+button { width: 100%; text-align: left; padding: 7px; border: 1px solid #343639; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button:hover { background: #26282b; }
 label { margin-right: 6px; }
 select { font: inherit; padding: 4px; margin-bottom: 8px; }
 
 .auto-setting { display: flex; align-items: flex-start; gap: 5px; margin: 4px 0 10px; }
+
+li { display: grid; gap: 4px; }
+select { color: inherit; background: #121315; border: 1px solid #343639; border-radius: 6px; }
