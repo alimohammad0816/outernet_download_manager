@@ -202,9 +202,18 @@ GitHub Actions builds x86-64 installers on Ubuntu 24.04 and Windows Server
 `src-tauri/tauri.conf.json` runs the large-file test before publishing a GitHub Release with the two
 installers, the two browser extensions, and a SHA-256 checksum file.
 
+## Updates
+
+Outernet checks GitHub Releases at launch and every six hours while it is open.
+When a newer stable release is available, the title bar displays **Update
+available**. You can also check manually under **Settings → Updates**.
+Signed builds with a matching release manifest can install updates from that
+panel when the download workers are idle. Other builds open the official
+GitHub release so you can download and install the package manually.
+
 ## Signing and store distribution
 
-Tagged builds can enable two independent Windows signatures through GitHub Actions.
+Tagged builds can enable updater signatures for Windows and Debian, plus an independent Authenticode signature for Windows.
 
 | GitHub setting | Value |
 | --- | --- |
@@ -218,11 +227,9 @@ Generate updater keys with `npm run tauri -- signer generate --write-keys /secur
 Keep a secure backup of the private key outside the repository. Keep the same
 updater key across releases so installed copies can verify future updates.
 A configured updater build includes the public key and the GitHub release
-endpoint. GitHub Actions verifies the installer signature before publishing
-`latest.json`. The Windows app checks and installs signed updates from
-Settings on request. Installation requires the download workers to be idle.
-Install the first updater-enabled build manually. Debian users can continue
-installing new `.deb` packages from GitHub Releases. See the
+endpoint. GitHub Actions verifies both installer signatures before publishing
+`latest.json`. Install the first updater-enabled build manually. Installing a
+Debian update may require operating-system authorization. See the
 [Tauri updater setup](https://v2.tauri.app/plugin/updater/).
 
 The Windows workflow imports the PFX into the runner's user certificate store

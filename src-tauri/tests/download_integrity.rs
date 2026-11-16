@@ -864,6 +864,9 @@ fn queues_limit_workers_independently_and_can_stop_and_resume() {
         requests.recv_timeout(Duration::from_secs(5)).unwrap(),
         "/main-1"
     );
+    assert!(store
+        .while_workers_idle::<()>(|| panic!("install started during a download"))
+        .is_err());
     assert!(!store.start_next(|_| {}).unwrap());
     store.set_queue_running(&other, true).unwrap();
     assert!(store.start_next(|_| {}).unwrap());
@@ -891,6 +894,7 @@ fn queues_limit_workers_independently_and_can_stop_and_resume() {
                 .iter()
                 .filter(|job| job.queue_id == other)
                 .all(|job| job.status == Status::Queued)
+            && store.while_workers_idle(|| Ok(())).is_ok()
         {
             break;
         }
@@ -905,6 +909,7 @@ fn queues_limit_workers_independently_and_can_stop_and_resume() {
     for _ in 0..3 {
         assert!(reopened.process_next().unwrap());
     }
+    assert!(reopened.while_workers_idle(|| Ok(())).is_ok());
     let finished = reopened.snapshot().unwrap();
     assert!(finished
         .jobs

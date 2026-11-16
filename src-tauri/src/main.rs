@@ -241,39 +241,107 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-#[tauri::command]
-fn updates_enabled(app: tauri::AppHandle) -> bool {
-    cfg!(windows) && app.config().plugins.0.contains_key("updater")
+const RELEASES_PAGE: &str =
+    "https://github.com/alimohammad0816/outernet_download_manager/releases/latest";
+const RELEASES_API: &str =
+    "https://api.github.com/repos/alimohammad0816/outernet_download_manager/releases/latest";
+
+fn signed_updates_enabled(app: &AppHandle) -> bool {
+    use tauri::utils::{config::BundleType, platform::bundle_type};
+
+    matches!(bundle_type(), Some(BundleType::Deb | BundleType::Nsis))
+        && app.config().plugins.0.contains_key("updater")
 }
 
-#[cfg(windows)]
-#[tauri::command]
-async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_updater::UpdaterExt;
+#[derive(serde::Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<ReleaseAsset>,
+}
 
-    if !updates_enabled(app.clone()) {
-        return Err("Updates are unavailable for this build.".into());
+#[derive(serde::Deserialize)]
+struct ReleaseAsset {
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AvailableUpdate {
+    version: String,
+    signed_install: bool,
+}
+
+impl GithubRelease {
+    fn newer_version(&self, current: &semver::Version) -> Option<semver::Version> {
+        if self.draft || self.prerelease {
+            return None;
+        }
+        let version = self
+            .tag_name
+            .strip_prefix('v')?
+            .parse::<semver::Version>()
+            .ok()?;
+        (version.pre.is_empty() && version > *current).then_some(version)
     }
-    app.updater()
-        .map_err(|error| error.to_string())?
-        .check()
-        .await
-        .map(|update| update.map(|update| update.version))
-        .map_err(|error| error.to_string())
 }
 
-#[cfg(windows)]
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<AvailableUpdate>, String> {
+    let mut response = reqwest::Client::builder()
+        .user_agent("Outernet Download Manager")
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|_| "Cannot initialize the update check.")?
+        .get(RELEASES_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|_| "Could not check GitHub for updates. Try again later.")?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Could not read update metadata.")?
+    {
+        if bytes.len() + chunk.len() > 1024 * 1024 {
+            return Err("GitHub returned oversized update metadata.".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let release: GithubRelease =
+        serde_json::from_slice(&bytes).map_err(|_| "GitHub returned invalid update metadata.")?;
+    Ok(release
+        .newer_version(&app.package_info().version)
+        .map(|version| AvailableUpdate {
+            version: version.to_string(),
+            signed_install: signed_updates_enabled(&app)
+                && release
+                    .assets
+                    .iter()
+                    .any(|asset| asset.name == "latest.json"),
+        }))
+}
+
+#[tauri::command]
+fn open_release_page() -> Result<(), String> {
+    tauri_plugin_opener::open_url(RELEASES_PAGE, None::<&str>).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn install_update(
-    app: tauri::AppHandle,
+    app: AppHandle,
     store: State<'_, Arc<Store>>,
     version: String,
 ) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
 
-    if !updates_enabled(app.clone()) {
-        return Err("Updates are unavailable for this build.".into());
+    if !signed_updates_enabled(&app) {
+        return Err("Signed updates are unavailable for this build.".into());
     }
+    store.while_workers_idle(|| Ok(()))?;
     let update = app
         .updater()
         .map_err(|error| error.to_string())?
@@ -286,7 +354,18 @@ async fn install_update(
         .download(|_, _| {}, || {})
         .await
         .map_err(|error| error.to_string())?;
-    store.while_workers_idle(|| update.install(bytes).map_err(|error| error.to_string()))
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        store.while_workers_idle(|| {
+            update.install(bytes).map_err(|error| error.to_string())?;
+            #[cfg(target_os = "linux")]
+            app.restart();
+            #[cfg(not(target_os = "linux"))]
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn main() {
@@ -319,8 +398,7 @@ fn main() {
             }
         })
         .setup(|app| {
-            #[cfg(windows)]
-            if updates_enabled(app.handle().clone()) {
+            if signed_updates_enabled(app.handle()) {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
@@ -376,12 +454,41 @@ fn main() {
             connect_browser,
             schedule_queue,
             set_priority,
-            updates_enabled,
-            #[cfg(windows)]
             check_update,
-            #[cfg(windows)]
+            open_release_page,
             install_update
         ])
         .run(tauri::generate_context!())
         .expect("Outernet could not start");
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::GithubRelease;
+
+    #[test]
+    fn only_newer_stable_published_releases_are_announced() {
+        let current = "1.9.0".parse().unwrap();
+        for (tag_name, draft, prerelease, expected) in [
+            ("v1.10.0", false, false, true),
+            ("v1.9.0", false, false, false),
+            ("v1.8.99", false, false, false),
+            ("v2.0.0", true, false, false),
+            ("v2.0.0", false, true, false),
+            ("v2.0.0-beta.1", false, false, false),
+            ("unknown", false, false, false),
+        ] {
+            let release = GithubRelease {
+                tag_name: tag_name.into(),
+                draft,
+                prerelease,
+                assets: vec![],
+            };
+            assert_eq!(
+                release.newer_version(&current).is_some(),
+                expected,
+                "{tag_name}"
+            );
+        }
+    }
 }

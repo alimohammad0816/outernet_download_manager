@@ -22,11 +22,11 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-24.04
-            bundle: deb
             artifact: linux-x64-deb
-            path: src-tauri/target/release/bundle/deb/*.deb
+            path: |
+              src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/deb/*.deb.sig
           - runner: windows-2025
-            bundle: nsis
             artifact: windows-x64-nsis
             path: |
               src-tauri/target/release/bundle/nsis/*-setup.exe
@@ -89,9 +89,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: ./scripts/build-windows-release.ps1
-      - name: Build installer
+      - name: Build Linux release installer
         if: runner.os == 'Linux'
-        run: npm run tauri -- build --bundles ${{ matrix.bundle }} -- --locked
+        env:
+          OUTERNET_UPDATER_PUBLIC_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && vars.OUTERNET_UPDATER_PUBLIC_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: bash scripts/build-linux-release.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
@@ -150,16 +154,24 @@ jobs:
           cd installers
           assets=(*.deb *-setup.exe outernet-browser-extension.zip outernet-firefox-extension.zip outernet-chromium-store.zip)
           if [[ -n "$OUTERNET_UPDATER_PUBLIC_KEY" ]]; then
-            installer=(*-setup.exe)
-            test "${#installer[@]}" -eq 1
-            sig="${installer[0]}.sig"
+            installers=(*-setup.exe *.deb)
+            test "${#installers[@]}" -eq 2
             printf '%s' "$OUTERNET_UPDATER_PUBLIC_KEY" | base64 --decode > "$RUNNER_TEMP/outernet.pub"
-            base64 --decode "$sig" > "$RUNNER_TEMP/outernet.minisig"
-            minisign -Vm "${installer[0]}" -p "$RUNNER_TEMP/outernet.pub" -x "$RUNNER_TEMP/outernet.minisig"
-            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/${installer[0]}"
-            jq -n --arg version "$version" --arg url "$url" --arg signature "$(cat "$sig")" \
-              '{version: $version, platforms: {"windows-x86_64": {url: $url, signature: $signature}}}' > latest.json
-            assets+=("$sig" latest.json)
+            for installer in "${installers[@]}"; do
+              sig="$installer.sig"
+              base64 --decode "$sig" > "$RUNNER_TEMP/outernet.minisig"
+              minisign -Vm "$installer" -p "$RUNNER_TEMP/outernet.pub" -x "$RUNNER_TEMP/outernet.minisig"
+              assets+=("$sig")
+            done
+            base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+            jq -n --arg version "$version" \
+              --arg windows_url "$base/${installers[0]}" --rawfile windows_sig "${installers[0]}.sig" \
+              --arg linux_url "$base/${installers[1]}" --rawfile linux_sig "${installers[1]}.sig" \
+              '{version: $version, platforms: {
+                "windows-x86_64": {url: $windows_url, signature: ($windows_sig | rtrimstr("\n") | rtrimstr("\r"))},
+                "linux-x86_64-deb": {url: $linux_url, signature: ($linux_sig | rtrimstr("\n") | rtrimstr("\r"))}
+              }}' > latest.json
+            assets+=(latest.json)
           fi
           sha256sum "${assets[@]}" > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" SHA256SUMS.txt \

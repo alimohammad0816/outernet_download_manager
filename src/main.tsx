@@ -298,59 +298,76 @@ function ReplaceLink({ job, onClose, onSave }: { job: Job; onClose: () => void; 
   </Modal>;
 }
 
-function UpdateControls() {
-  const [enabled, setEnabled] = useState(false);
-  const [version, setVersion] = useState<string | null>(null);
+type AvailableUpdate = { version: string; signedInstall: boolean };
+
+function useUpdates() {
+  const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const active = useRef(false);
 
-  useEffect(() => {
-    void invoke<boolean>("updates_enabled").then(setEnabled).catch(() => setEnabled(false));
+  const check = useCallback(async (manual: boolean) => {
+    if (active.current) return;
+    active.current = true;
+    setBusy(true);
+    if (manual) setMessage("Checking GitHub…");
+    try {
+      const update = await invoke<AvailableUpdate | null>("check_update");
+      setAvailable(update);
+      setMessage(manual && !update ? "Outernet is up to date." : "");
+    } catch (failure) {
+      if (manual) setMessage(describe(failure));
+    } finally {
+      setBusy(false);
+      active.current = false;
+    }
   }, []);
 
-  async function check() {
+  useEffect(() => {
+    void check(false);
+    const timer = window.setInterval(() => void check(false), 6 * 60 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [check]);
+
+  async function update() {
+    if (!available || active.current) return;
+    active.current = true;
     setBusy(true);
-    setVersion(null);
-    setMessage("");
+    setMessage(available.signedInstall ? "Downloading and verifying the signed installer…" : "");
     try {
-      const available = await invoke<string | null>("check_update");
-      setVersion(available);
-      setMessage(available ? `Version ${available} is available.` : "Outernet is up to date.");
+      if (available.signedInstall) await invoke("install_update", { version: available.version });
+      else await invoke("open_release_page");
     } catch (failure) {
       setMessage(describe(failure));
     } finally {
+      active.current = false;
       setBusy(false);
     }
   }
 
-  async function install() {
-    setBusy(true);
-    setMessage("Downloading and verifying the signed installer…");
-    try {
-      await invoke("install_update", { version });
-    } catch (failure) {
-      setMessage(describe(failure));
-    } finally {
-      setBusy(false);
-    }
-  }
+  return { available, busy, message, check, update };
+}
 
-  return enabled && (
-    <div className="field">
-      <button type="button" className="button secondary" onClick={() => void check()} disabled={busy}>
-        Check for updates
-      </button>
+function UpdateControls({ updates }: { updates: ReturnType<typeof useUpdates> }) {
+  const { available, busy, message, check, update } = updates;
+  return (
+    <section className="settings-section">
+      <h3>Updates</h3>
+      {available && <p>Outernet {available.version} is available.</p>}
+      <div className="update-actions">
+        {available && (
+          <button type="button" className="button queue-submit" onClick={() => void update()} disabled={busy}>
+            {available.signedInstall ? "Update and restart" : "Open GitHub release"}
+          </button>
+        )}
+        <button type="button" className="button secondary" onClick={() => void check(true)} disabled={busy}>Check for updates</button>
+      </div>
       {message && <small role="status">{message}</small>}
-      {version && (
-        <button type="button" className="button secondary" onClick={() => void install()} disabled={busy}>
-          Install and restart
-        </button>
-      )}
-    </div>
+    </section>
   );
 }
 
-function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClose: () => void; onSave: () => Promise<void> }) {
+function SettingsForm({ settings, updates, onClose, onSave }: { settings: Settings; updates: ReturnType<typeof useUpdates>; onClose: () => void; onSave: () => Promise<void> }) {
   const [paths, setPaths] = useState(settings);
   const [proxyMode, setProxyMode] = useState<ProxyMode>(settings.proxy.mode);
   const [proxyUrl, setProxyUrl] = useState(settings.proxy.mode === "custom" ? settings.proxy.url : "");
@@ -388,6 +405,7 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
       className="workspace-dialog settings-dialog" onClose={onClose}>
       <form className="workspace-form" onSubmit={submit}>
         <div className="workspace-body">
+          <UpdateControls updates={updates} />
           <section className="settings-section">
             <h3>Storage</h3>
             {([["workingFolder", "In-progress folder"], ["destinationFolder", "Completed downloads folder"]] as const).map(([key, label]) => (
@@ -440,7 +458,6 @@ function SettingsForm({ settings, onClose, onSave }: { settings: Settings; onClo
               <input type="checkbox" role="switch" checked={paths.notifyWhenFinished}
                 onChange={event => setPaths({ ...paths, notifyWhenFinished: event.target.checked })} />
             </label>
-            <UpdateControls />
           </section>
           {error && <p className="error" role="alert">{error}</p>}
         </div>
@@ -872,6 +889,7 @@ function DownloadProperties({ job, onClose }: { job: Job; onClose: () => void })
 }
 
 function App() {
+  const updates = useUpdates();
   const [state, setState] = useState<Snapshot>();
   const [filter, setFilter] = useState<Filter>("all");
   const [category, setCategory] = useState("");
@@ -1003,6 +1021,8 @@ function App() {
       }}>
         <div className="brand"><img className="brand-icon" src="/outernet.svg" width={28} height={28} alt="" /> Outernet</div>
         <div className="app-actions">
+          {updates.available && <button type="button" className="button secondary update-notice"
+            disabled={!state} onClick={() => setPanel("settings")}><ArrowDownToLine size={15} /> Update available</button>}
           <button className="icon-button" title="Queue schedule" aria-label="Queue schedule" disabled={!state} onClick={() => setPanel("schedule")}><CalendarClock size={17} /></button>
           <button className="icon-button" title="Browser integration" aria-label="Browser integration" onClick={() => setPanel("browser")}><Globe size={17} /></button>
           <button className="icon-button" title="Settings" aria-label="Settings" disabled={!state} onClick={() => setPanel("settings")}><Settings2 size={17} /></button>
@@ -1155,7 +1175,7 @@ function App() {
       {queueForm && <QueueForm queue={queueForm === "new" ? null : queueForm} onClose={() => setQueueForm(null)}
         onSave={async id => { setQueueId(id); await refresh(); }} />}
       {moving && <MoveDownload job={moving} queues={queues} onClose={() => setMoving(null)} onSave={refresh} />}
-      {panel === "settings" && state && <SettingsForm settings={state.settings} onClose={closePanel} onSave={refresh} />}
+      {panel === "settings" && state && <SettingsForm settings={state.settings} updates={updates} onClose={closePanel} onSave={refresh} />}
     </div>
   );
 }

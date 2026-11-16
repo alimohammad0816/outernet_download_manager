@@ -786,7 +786,6 @@ impl Store {
         Ok(())
     }
 
-    #[cfg(windows)]
     pub fn while_workers_idle<T>(
         &self,
         action: impl FnOnce() -> Result<T, String>,
