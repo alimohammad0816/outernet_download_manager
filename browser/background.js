@@ -41,7 +41,7 @@ async function download(tabId, source) {
   const url = webUrl(source.url);
   const { maxHeight } = source.format && source.format !== "file"
     ? await api.storage.local.get("maxHeight") : {};
-  const height = source.format === "hls" || source.format === "dash"
+  const height = ["hls", "hls_live", "dash"].includes(source.format)
     ? ([0, ...QUALITY_CAPS].includes(source.maxHeight) ? source.maxHeight : maxHeight)
     : undefined;
   let response;

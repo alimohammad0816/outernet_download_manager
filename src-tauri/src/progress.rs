@@ -13,6 +13,7 @@ pub const MAX_SPEED_KIB: u32 = 1024 * 1024;
 
 pub struct TransferControl {
     paused: AtomicBool,
+    finish_requested: AtomicBool,
     received: AtomicU64,
     completed: AtomicU64,
     total: Mutex<Option<u64>>,
@@ -34,6 +35,7 @@ impl TransferControl {
         let now = Instant::now();
         Self {
             paused: AtomicBool::new(false),
+            finish_requested: AtomicBool::new(false),
             received: AtomicU64::new(0),
             completed: AtomicU64::new(0),
             total: Mutex::new(None),
@@ -41,6 +43,14 @@ impl TransferControl {
             next_chunk: Mutex::new(now),
             samples: Mutex::new(VecDeque::from([(now, 0)])),
         }
+    }
+
+    pub fn finish_recording(&self) {
+        self.finish_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn recording_finished(&self) -> bool {
+        self.finish_requested.load(Ordering::Relaxed)
     }
 
     pub fn pause(&self) {

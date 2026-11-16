@@ -116,4 +116,7 @@ dialog { max-height: calc(100vh - 32px); overflow: auto; }
 .schedule-times { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .schedule-notice + .schedule-notice { margin-left: 6px; }
 .priority-control { display: flex; width: fit-content; margin-top: 4px; align-items: center; gap: 6px; font-size: .8rem; color: var(--muted); }
-.priority-control select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+.category-filter select, .priority-control select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; }
+
+.category-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }

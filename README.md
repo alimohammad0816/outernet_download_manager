@@ -59,11 +59,33 @@ and the extension cancels the original only after the desktop confirms that
 the complete body is durably queued. If the handoff fails, the extension
 resumes the original when the browser can resume it.
 
-Video support covers finished unencrypted HLS playlists with discrete
-segments or byte ranges, and static single-period DASH with fragmented MP4
-SegmentTemplates. For HLS byte ranges, the server must return the requested
-range and a strong ETag so Outernet can detect source changes. Outernet
-assembles these streams into Matroska (`.mkv`).
+Video support covers finished HLS with discrete segments or byte ranges and
+static single-period DASH with fragmented MP4 SegmentTemplates. HLS byte
+ranges require a strong ETag and matching range responses. Finished HLS also
+supports standard AES-128 with identity keys served by the site, including
+explicit IVs and key rotation. The AES-128 path supports complete segments.
+DRM and SAMPLE-AES require a different playback path.
+
+For a compatible live HLS stream, choose **Record live in Outernet** next to
+the video or **Record live** in the popup. Use **Stop and save recording** in
+the desktop queue to finalize the captured portion. Live recording supports
+unencrypted, multiplexed streams with discrete MPEG-TS segments. It retries
+temporary failures while the segments remain available and fails if the
+server window advances past a missing segment. The output is Matroska
+(`.mkv`).
+
+## Manage downloads
+
+In **Add download**, enable **Add multiple links** and paste one URL per line
+(up to 500). Outernet validates the batch before committing it to the queue.
+Existing and conflicting filenames receive a numbered suffix. Use **File type**
+to filter downloads by filename extension.
+
+Use **Replace link** on an incomplete failed or paused download. The queue
+keeps its filename, destination, priority, and existing publisher checksum.
+When the URL changes, Outernet reuses verified byte ranges only if the
+publisher SHA-256 is known and the remote size and strong ETag match. The
+complete file must still match the publisher checksum before publication.
 
 ## Schedule the queue
 

@@ -65,6 +65,7 @@ fn parse_part_name(name: &str) -> Option<u64> {
 pub fn try_download(
     url: &str,
     directory: &Path,
+    has_expected_hash: bool,
     control: &TransferControl,
 ) -> Result<bool, String> {
     control.check()?;
@@ -79,8 +80,11 @@ pub fn try_download(
         Err(_) => return Err("Cannot check the remote file. Completed parts were kept.".into()),
     };
     let Some(identity) = identity(&response) else {
-        if response.status().is_server_error() && has_checkpoint(directory) {
-            return Err("The server is temporarily unavailable. Completed parts were kept.".into());
+        if source_unavailable(response.status()) && has_checkpoint(directory) {
+            return Err(
+                "The source is unavailable. Completed parts were kept. Retry or replace the link."
+                    .into(),
+            );
         }
         return Ok(false);
     };
@@ -90,14 +94,21 @@ pub fn try_download(
     let previous = File::open(&checkpoint)
         .ok()
         .and_then(|file| serde_json::from_reader::<_, Identity>(file).ok());
-    if previous.as_ref() != Some(&identity)
-        || fs::metadata(&payload).map(|file| file.len()).ok() != Some(identity.length)
-    {
+    let same_version = previous.as_ref().is_some_and(|previous| {
+        previous == &identity
+            || (has_expected_hash
+                && previous.length == identity.length
+                && previous.etag == identity.etag)
+    }) && fs::metadata(&payload).map(|file| file.len()).ok()
+        == Some(identity.length);
+    if !same_version {
         transfer::reset_working_directory(directory)?;
         fs::create_dir(directory).map_err(write_error)?;
         let file = File::create(&payload).map_err(write_error)?;
         file.set_len(identity.length).map_err(write_error)?;
         file.sync_all().map_err(write_error)?;
+    }
+    if !same_version || previous.as_ref() != Some(&identity) {
         let bytes = serde_json::to_vec(&identity).map_err(|error| error.to_string())?;
         save_marker(directory, &checkpoint, &bytes).map_err(write_error)?;
     }
@@ -155,6 +166,10 @@ pub fn try_download(
         }
         Some(PartError::Write(error)) => Err(write_error(error)),
     }
+}
+
+fn source_unavailable(status: StatusCode) -> bool {
+    status.is_server_error() || matches!(status.as_u16(), 401 | 403 | 404 | 410 | 429)
 }
 
 fn identity(response: &Response) -> Option<Identity> {
@@ -231,7 +246,7 @@ fn fetch_part(
         .header(header::IF_RANGE, &identity.etag)
         .send()
         .map_err(|_| PartError::Interrupted)?;
-    if response.status().is_server_error() || response.status() == StatusCode::TOO_MANY_REQUESTS {
+    if source_unavailable(response.status()) {
         return Err(PartError::Interrupted);
     }
     let range = format!("bytes {start}-{end}/{}", identity.length);

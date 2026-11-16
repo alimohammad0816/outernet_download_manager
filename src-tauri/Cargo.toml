@@ -1,6 +1,6 @@
 [package]
 name = "outernet"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "GPL-3.0-only"
 
@@ -8,6 +8,7 @@ license = "GPL-3.0-only"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+aws-lc-rs = { version = "1", default-features = false }
 base64 = "0.22"
 chrono = "0.4"
 dirs = "7"

@@ -44,8 +44,31 @@ async fn add_download(
 }
 
 #[tauri::command]
+async fn add_download_batch(
+    store: State<'_, Arc<Store>>,
+    links: Vec<(String, String)>,
+) -> Result<(), String> {
+    store.add_batch(links)
+}
+
+#[tauri::command]
+async fn replace_download_link(
+    store: State<'_, Arc<Store>>,
+    id: String,
+    url: String,
+    sha256: Option<String>,
+) -> Result<(), String> {
+    store.replace_link(id, url, sha256)
+}
+
+#[tauri::command]
 async fn retry_download(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
     store.retry(id)
+}
+
+#[tauri::command]
+async fn stop_recording(store: State<'_, Arc<Store>>, id: String) -> Result<(), String> {
+    store.stop_recording(id)
 }
 
 #[tauri::command]
@@ -263,8 +286,11 @@ fn main() {
             snapshot,
             save_settings,
             add_download,
+            add_download_batch,
+            replace_download_link,
             retry_download,
             pause_download,
+            stop_recording,
             connect_browser,
             schedule_queue,
             set_priority,

@@ -208,6 +208,9 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
     await send({ action: "download", tabId: 8, ...frame.streams[1], maxHeight: 480 });
     assert.deepEqual(native.map(message => message.max_height), [480, 0, 720, undefined]);
     assert.equal(native.at(-1).filename, "movie.mp4");
+    await send({ action: "download", tabId: 8, ...frame.streams[0], format: "hls_live", maxHeight: 480 });
+    assert.equal(native.at(-1).format, "hls_live");
+    assert.equal(native.at(-1).max_height, 480);
   } finally {
     delete globalThis.chrome;
   }

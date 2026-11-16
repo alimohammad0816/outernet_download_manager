@@ -1,7 +1,13 @@
 #[path = "media/dash.rs"]
 mod dash;
+#[path = "media/live.rs"]
+mod live;
 
 use crate::{progress::TransferControl, transfer};
+use aws_lc_rs::{
+    cipher::{DecryptionContext, StreamingDecryptingKey, UnboundCipherKey, AES_128},
+    iv::FixedLength,
+};
 use reqwest::{
     blocking::{Client, Response},
     header, StatusCode,
@@ -25,6 +31,7 @@ pub enum Format {
     #[default]
     File,
     Hls,
+    HlsLive,
     Dash,
 }
 
@@ -65,6 +72,15 @@ pub fn download(
     ]);
     let duration = match format {
         Format::Hls => prepare_hls(
+            &client,
+            directory,
+            manifest_url,
+            manifest,
+            &mut ffmpeg,
+            max_height,
+            control,
+        )?,
+        Format::HlsLive => live::record(
             &client,
             directory,
             manifest_url,
@@ -177,10 +193,17 @@ fn hls_lines(text: &str) -> Result<Vec<&str>, String> {
             .strip_prefix("#EXT-X-KEY:")
             .or_else(|| line.strip_prefix("#EXT-X-SESSION-KEY:"))
         {
-            if attributes(key).get("METHOD") != Some(&"NONE") {
-                return Err(
-                    "This HLS playlist uses encryption. Choose an unencrypted stream.".into(),
-                );
+            let attrs = attributes(key);
+            if attrs.get("METHOD") != Some(&"NONE")
+                && (attrs.get("METHOD") != Some(&"AES-128")
+                    || attrs
+                        .get("KEYFORMAT")
+                        .is_some_and(|format| *format != "identity")
+                    || attrs
+                        .get("KEYFORMATVERSIONS")
+                        .is_some_and(|versions| *versions != "1"))
+            {
+                return Err("This HLS encryption method or key format is unsupported.".into());
             }
         }
     }
@@ -318,6 +341,63 @@ fn prepare_hls(
     Ok(duration)
 }
 
+struct HlsKey {
+    bytes: [u8; 16],
+    iv: Option<u128>,
+}
+
+impl HlsKey {
+    fn load(client: &Client, base: &Url, tag: &str) -> Result<Option<Self>, String> {
+        let attrs = attributes(tag);
+        if attrs.get("METHOD") == Some(&"NONE") {
+            return Ok(None);
+        }
+        let iv = attrs
+            .get("IV")
+            .map(|value| {
+                value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))
+                    .filter(|digits| {
+                        !digits.is_empty()
+                            && digits.len() <= 32
+                            && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .and_then(|digits| u128::from_str_radix(digits, 16).ok())
+                    .ok_or("The HLS key has an invalid initialization vector.")
+            })
+            .transpose()?;
+        let url = source_url(base, attrs.get("URI").ok_or("The HLS key has no URL.")?)?;
+        let response = open_http(client, &url)?;
+        if base.scheme() == "https" && response.url().scheme() != "https" {
+            return Err("The HLS key URL must use HTTPS for an HTTPS playlist.".into());
+        }
+        let mut bytes = Vec::with_capacity(17);
+        response
+            .take(17)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read the HLS key.")?;
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| "The HLS key must contain exactly 16 bytes.")?;
+        Ok(Some(Self { bytes, iv }))
+    }
+
+    fn decoder(&self, sequence: Option<u64>) -> Result<StreamingDecryptingKey, String> {
+        let iv = self
+            .iv
+            .or_else(|| sequence.map(u128::from))
+            .ok_or("An encrypted HLS initialization section requires an explicit IV.")?;
+        let key = UnboundCipherKey::new(&AES_128, &self.bytes)
+            .map_err(|_| "Cannot initialize the HLS decryption key.")?;
+        StreamingDecryptingKey::cbc_pkcs7(
+            key,
+            DecryptionContext::Iv128(FixedLength::from(iv.to_be_bytes())),
+        )
+        .map_err(|_| "Cannot initialize HLS decryption.".into())
+    }
+}
+
 fn stage_hls(
     client: &Client,
     directory: &Path,
@@ -328,7 +408,7 @@ fn stage_hls(
 ) -> Result<(PathBuf, f64), String> {
     let lines = hls_lines(manifest)?;
     if !lines.contains(&"#EXT-X-ENDLIST") {
-        return Err("Choose a finished HLS video. Live streams are currently unsupported.".into());
+        return Err("Use Record live in the browser extension for an ongoing HLS stream.".into());
     }
     if lines.iter().any(|line| {
         ["#EXT-X-SKIP", "#EXT-X-GAP", "#EXT-X-STREAM-INF"]
@@ -347,8 +427,22 @@ fn stage_hls(
     let mut pending_range = None;
     let mut previous_range = None;
     let mut resources = HashMap::new();
+    let mut key = None;
+    let mut sequence = None;
     for line in lines {
-        if let Some(value) = line.strip_prefix("#EXTINF:") {
+        if let Some(tag) = line.strip_prefix("#EXT-X-KEY:") {
+            control.check()?;
+            key = HlsKey::load(client, base, tag)?;
+        } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+            if count != 0 || sequence.is_some() {
+                return Err("An HLS media sequence tag is misplaced or duplicated.".into());
+            }
+            sequence = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "The HLS media sequence is invalid.")?,
+            );
+        } else if let Some(value) = line.strip_prefix("#EXTINF:") {
             let seconds = value
                 .split(',')
                 .next()
@@ -381,6 +475,7 @@ fn stage_hls(
                 &directory.join(&name),
                 range,
                 &mut resources,
+                key.as_ref().map(|key| key.decoder(None)).transpose()?,
                 control,
             )?;
             playlist.push_str(&format!("#EXT-X-MAP:URI=\"{name}\"\n"));
@@ -411,12 +506,19 @@ fn stage_hls(
                 .take()
                 .map(|value| hls_range(value, implicit_start))
                 .transpose()?;
+            let number = sequence
+                .unwrap_or(0)
+                .checked_add(count as u64)
+                .ok_or("The HLS media sequence overflows.")?;
             fetch_segment(
                 client,
                 &url,
                 &directory.join(&name),
                 range,
                 &mut resources,
+                key.as_ref()
+                    .map(|key| key.decoder(Some(number)))
+                    .transpose()?,
                 control,
             )?;
             previous_range = range.map(|(_, end)| (url, end));
@@ -518,6 +620,7 @@ fn fetch_segment(
     destination: &Path,
     range: Option<(u64, u64)>,
     resources: &mut HashMap<Url, HlsResource>,
+    decryption: Option<StreamingDecryptingKey>,
     control: &TransferControl,
 ) -> Result<(), String> {
     control.check()?;
@@ -526,15 +629,23 @@ fn fetch_segment(
         .write(true)
         .open(destination)
         .map_err(disk_error)?;
-    match range {
-        Some((start, end)) => copy_response(
-            open_hls_range(client, url, start, end, resources)?,
-            &mut file,
-            Some(end - start),
-            control,
-        ),
-        None => copy_segment(client, url, &mut file, control),
+    if decryption.is_some() && range.is_some() {
+        return Err("Encrypted HLS byte ranges are currently unsupported.".into());
     }
+    let (response, expected) = match range {
+        Some((start, end)) => (
+            open_hls_range(client, url, start, end, resources)?,
+            Some(end - start),
+        ),
+        None => open_segment(client, url)?,
+    };
+    copy_response(response, &mut file, expected, decryption, control)
+}
+
+fn open_segment(client: &Client, url: &Url) -> Result<(Response, Option<u64>), String> {
+    let response = open_http(client, url)?;
+    let expected = response.content_length();
+    Ok((response, expected))
 }
 
 fn copy_segment(
@@ -544,23 +655,22 @@ fn copy_segment(
     control: &TransferControl,
 ) -> Result<(), String> {
     control.check()?;
-    let response = open_http(client, url)?;
-    let expected = response
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|length| length.parse::<u64>().ok());
-    copy_response(response, file, expected, control)
+    let (response, expected) = open_segment(client, url)?;
+    copy_response(response, file, expected, None, control)
 }
 
 fn copy_response(
     mut response: Response,
     file: &mut File,
     expected: Option<u64>,
+    mut decryption: Option<StreamingDecryptingKey>,
     control: &TransferControl,
 ) -> Result<(), String> {
     let mut bytes = 0;
     let mut block = vec![0; control.chunk_bytes(64 * 1024)];
+    let mut plaintext = decryption
+        .as_ref()
+        .map(|_| vec![0; block.len() + AES_128.block_len()]);
     loop {
         control.check()?;
         let length = response
@@ -574,11 +684,24 @@ fn copy_response(
             return Err("The server returned more bytes than expected for a video segment.".into());
         }
         control.account_network(length)?;
-        file.write_all(&block[..length]).map_err(disk_error)?;
+        if let (Some(decoder), Some(plaintext)) = (&mut decryption, &mut plaintext) {
+            let output = decoder
+                .update(&block[..length], plaintext)
+                .map_err(|_| "Cannot decrypt the HLS segment.")?;
+            file.write_all(output.written()).map_err(disk_error)?;
+        } else {
+            file.write_all(&block[..length]).map_err(disk_error)?;
+        }
         control.commit_bytes(length as u64);
     }
     if bytes == 0 || expected.is_some_and(|length| length != bytes) {
         return Err("The server returned an incomplete video segment.".into());
+    }
+    if let (Some(decoder), Some(plaintext)) = (decryption, plaintext.as_mut()) {
+        let output = decoder.finish(plaintext).map_err(|_| {
+            "The HLS segment could not be decrypted. The key or segment may be invalid."
+        })?;
+        file.write_all(output.written()).map_err(disk_error)?;
     }
     Ok(())
 }

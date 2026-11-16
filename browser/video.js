@@ -102,6 +102,9 @@
       return;
     }
     choices.replaceChildren();
+    if (source.format === "hls") {
+      addChoice("Record live in Outernet", () => void send({ ...source, format: "hls_live" }));
+    }
     addChoice("Use extension preference", () => void send(source));
     for (const [height, label] of [[0, "Best available"], [1080, "Up to 1080p"], [720, "Up to 720p"], [480, "Up to 480p"], [360, "Up to 360p"]]) {
       addChoice(label, () => void send({ ...source, maxHeight: height }));

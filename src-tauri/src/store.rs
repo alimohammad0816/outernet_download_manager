@@ -278,13 +278,52 @@ impl Store {
         sha256: String,
         browser_source: Option<(Option<Format>, Option<u32>)>,
     ) -> Result<(), String> {
+        self.update(|state| {
+            let job = Self::new_job(
+                state.settings.clone(),
+                url,
+                filename,
+                sha256,
+                browser_source,
+            )?;
+            Self::enqueue(state, job, browser_source.is_some())
+        })
+    }
+
+    pub fn add_batch(&self, links: Vec<(String, String)>) -> Result<(), String> {
+        if !(1..=500).contains(&links.len()) {
+            return Err("Enter between 1 and 500 links.".into());
+        }
+        self.update(|state| {
+            for (index, (url, filename)) in links.into_iter().enumerate() {
+                let job = Self::new_job(state.settings.clone(), url, filename, String::new(), None)
+                    .map_err(|error| format!("Link {}: {error}", index + 1))?;
+                Self::enqueue(state, job, true)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn enqueue(state: &mut Snapshot, mut job: Job, rename: bool) -> Result<(), String> {
+        job.filename = available_name(state, &job.settings, job.filename, rename)?;
+        state.jobs.insert(0, job);
+        Ok(())
+    }
+
+    fn new_job(
+        settings: Settings,
+        url: String,
+        filename: String,
+        sha256: String,
+        browser_source: Option<(Option<Format>, Option<u32>)>,
+    ) -> Result<Job, String> {
         let url = transfer::parse_url(&url)?;
         let (format, max_height) = browser_source.unwrap_or_default();
         let format = format.unwrap_or_else(|| Format::from_url(&url));
         let max_height = max_height.filter(|height| (1..=4320).contains(height));
         let mut filename = filename.trim().to_string();
         if format != Format::File && !filename.to_ascii_lowercase().ends_with(".mkv") {
-            let suffix = if format == Format::Hls {
+            let suffix = if matches!(format, Format::Hls | Format::HlsLive) {
                 ".m3u8"
             } else {
                 ".mpd"
@@ -305,29 +344,21 @@ impl Store {
         } else {
             return Err("SHA-256 must contain exactly 64 hexadecimal characters.".into());
         };
-        self.update(|state| {
-            let settings = state.settings.clone();
-            filename = available_name(state, &settings, filename, browser_source.is_some())?;
-            state.jobs.insert(
-                0,
-                Job {
-                    id: Uuid::new_v4().to_string(),
-                    url: url.into(),
-                    filename,
-                    settings,
-                    format,
-                    max_height,
-                    expected_sha256,
-                    sha256: None,
-                    status: Status::Queued,
-                    priority: Priority::Normal,
-                    error: None,
-                    bytes: 0,
-                    transfer: None,
-                    attempt: None,
-                },
-            );
-            Ok(())
+        Ok(Job {
+            id: Uuid::new_v4().to_string(),
+            url: url.into(),
+            filename,
+            settings,
+            format,
+            max_height,
+            expected_sha256,
+            sha256: None,
+            status: Status::Queued,
+            priority: Priority::Normal,
+            error: None,
+            bytes: 0,
+            transfer: None,
+            attempt: None,
         })
     }
 
@@ -429,6 +460,24 @@ impl Store {
         Ok(())
     }
 
+    pub fn stop_recording(&self, id: String) -> Result<(), String> {
+        let workers = self.workers.lock().map_err(db_error)?;
+        let state = self.read()?.ok_or("Missing application state.")?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or("Download not found.")?;
+        if job.format != Format::HlsLive || job.status != Status::Downloading {
+            return Err("Choose an active live recording.".into());
+        }
+        workers
+            .get(&id)
+            .ok_or("The recording is no longer active.")?
+            .finish_recording();
+        Ok(())
+    }
+
     pub fn retry(&self, id: String) -> Result<(), String> {
         self.update(|state| {
             let job = state
@@ -446,6 +495,54 @@ impl Store {
                 Status::Queued
             };
             job.error = None;
+            Ok(())
+        })
+    }
+
+    pub fn replace_link(
+        &self,
+        id: String,
+        url: String,
+        sha256: Option<String>,
+    ) -> Result<(), String> {
+        let url = transfer::parse_url(&url)?;
+        let sha256 = sha256
+            .map(|hash| hash.trim().to_ascii_lowercase())
+            .filter(|hash| !hash.is_empty());
+        if sha256.as_ref().is_some_and(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err("SHA-256 must contain exactly 64 hexadecimal characters.".into());
+        }
+        let _workers = self.workers.lock().map_err(db_error)?;
+        self.update(|state| {
+            let job = state
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or("Download not found.")?;
+            if !matches!(job.status, Status::Failed | Status::Paused) || job.sha256.is_some() {
+                return Err(
+                    "Choose a failed or paused transfer that has not yet been verified.".into(),
+                );
+            }
+            if let Some(hash) = sha256 {
+                if job
+                    .expected_sha256
+                    .as_ref()
+                    .is_some_and(|expected| expected != &hash)
+                {
+                    return Err(
+                        "The checksum differs from the checksum already saved for this transfer."
+                            .into(),
+                    );
+                }
+                job.expected_sha256 = Some(hash);
+            }
+            job.url = url.into();
+            job.status = Status::Queued;
+            job.error = None;
+            job.bytes = 0;
             Ok(())
         })
     }
@@ -598,7 +695,12 @@ impl Store {
         }
         match job.format {
             Format::File => {
-                if !ranges::try_download(&job.url, &directory, control)? {
+                if !ranges::try_download(
+                    &job.url,
+                    &directory,
+                    job.expected_sha256.is_some(),
+                    control,
+                )? {
                     transfer::reset_working_directory(&directory)?;
                     transfer::download(
                         &job.url,

@@ -26,22 +26,27 @@ try {
   }
   for (const stream of data?.streams ?? []) {
     const row = document.createElement("li");
-    const button = document.createElement("button");
     const url = new URL(stream.url);
+    const name = url.pathname.split("/").pop() || url.hostname;
     const format = stream.format === "file" ? "video file" : stream.format.toUpperCase();
-    button.textContent = `Download ${format} · ${url.pathname.split("/").pop() || url.hostname}`;
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      try {
-        const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, maxHeight: Number(quality.value) });
-        status.textContent = result.ok ? "Added to Outernet" : result.error;
-      } catch {
-        status.textContent = "Could not send this download.";
-      } finally {
-        button.disabled = false;
-      }
-    });
-    row.append(button);
+    const actions = [[`Download ${format} · ${name}`, stream.format]];
+    if (stream.format === "hls") actions.push([`Record live · ${name}`, "hls_live"]);
+    for (const [label, format] of actions) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, format, maxHeight: Number(quality.value) });
+          status.textContent = result.ok ? "Added to Outernet" : result.error;
+        } catch {
+          status.textContent = "Could not send this download.";
+        } finally {
+          button.disabled = false;
+        }
+      });
+      row.append(button);
+    }
     list.append(row);
   }
 } catch {

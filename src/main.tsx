@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDownToLine, CalendarClock, Check, CircleAlert, FolderOpen, Globe, HardDrive, List, Pause, Play, Plus, RefreshCw, Settings2, X } from "lucide-react";
+import { ArrowDownToLine, CalendarClock, Check, CircleAlert, FolderOpen, Globe, HardDrive, Link, List, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -21,6 +21,7 @@ type Job = {
   id: string;
   url: string;
   filename: string;
+  format?: "file" | "hls" | "hls_live" | "dash";
   status: Status;
   priority: Priority;
   expectedSha256: string | null;
@@ -31,6 +32,19 @@ type Job = {
 };
 type Snapshot = { settings: Settings; jobs: Job[]; run_after: number | null; daily_window: DailyWindow | null };
 type Filter = "all" | "complete" | "failed";
+const categories = {
+  Video: /\.(mp4|m4v|mkv|mov|avi|webm|ts|m3u8|mpd)$/i,
+  Audio: /\.(mp3|flac|wav|ogg|opus|m4a|aac)$/i,
+  Images: /\.(png|jpg|jpeg|svg|webp|gif|avif|heic)$/i,
+  Documents: /\.(pdf|txt|docx?|xlsx?|pptx?|csv|odt|epub)$/i,
+  Archives: /\.(zip|rar|7z|tar|gz|bz2|xz|zst)$/i,
+  Software: /\.(exe|msi|deb|rpm|appimage|apk|iso|dmg|pkg)$/i,
+};
+
+function fileCategory(filename: string) {
+  return Object.entries(categories).find(([, extension]) => extension.test(filename))?.[0] ?? "Other";
+}
+
 type Panel = "add" | "settings" | "browser" | "schedule";
 
 const statusLabel: Record<Status, string> = {
@@ -129,6 +143,8 @@ function FormActions({ busy, error, onClose, label }: { busy: boolean; error: st
 
 function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => Promise<void> }) {
   const [url, setUrl] = useState("");
+  const [batch, setBatch] = useState(false);
+  const [links, setLinks] = useState("");
   const [filename, setFilename] = useState<string | null>(null);
   const [sha256, setSha256] = useState("");
   const [busy, setBusy] = useState(false);
@@ -139,7 +155,12 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
     setBusy(true);
     setError("");
     try {
-      await invoke("add_download", { url, filename: filename ?? suggestedName(url), sha256 });
+      if (batch) {
+        const entries = links.split(/\r?\n/).map(link => link.trim()).filter(Boolean);
+        await invoke("add_download_batch", { links: entries.map(link => [link, suggestedName(link) || "download"]) });
+      } else {
+        await invoke("add_download", { url, filename: filename ?? suggestedName(url), sha256 });
+      }
       await onSave();
       onClose();
     } catch (failure) {
@@ -152,13 +173,51 @@ function AddDownload({ onClose, onSave }: { onClose: () => void; onSave: () => P
   return (
     <Modal title="New download" onClose={onClose}>
       <form onSubmit={submit}>
+        <label className="checkbox"><input type="checkbox" checked={batch} onChange={event => { setBatch(event.target.checked); setError(""); }} /> Add multiple links</label>
+        {batch ? <label>Download URLs <span>One link per line</span><textarea rows={7}
+          value={links} onChange={event => setLinks(event.target.value)} spellCheck={false} required /></label> : <>
         <label>Download URL<input data-initial-focus type="url" placeholder="https://example.com/file.zip" value={url} onChange={event => setUrl(event.target.value)} required /></label>
         <label>Filename<input value={filename ?? suggestedName(url)} onChange={event => setFilename(event.target.value)} required /></label>
         <label>Expected SHA-256 <span>Optional</span><input spellCheck={false} autoComplete="off" value={sha256} onChange={event => setSha256(event.target.value)} placeholder="Checksum provided by the publisher" /></label>
-        <FormActions busy={busy} error={error} onClose={onClose} label="Add download" />
+        </>}
+        <FormActions busy={busy} error={error} onClose={onClose} label={batch ? "Add downloads" : "Add download"} />
       </form>
     </Modal>
   );
+}
+
+function ReplaceLink({ job, onClose, onSave }: { job: Job; onClose: () => void; onSave: () => Promise<void> }) {
+  const [url, setUrl] = useState("");
+  const [sha256, setSha256] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await invoke("replace_download_link", { id: job.id, url, sha256: sha256 || null });
+      await onSave();
+      onClose();
+    } catch (failure) {
+      setError(describe(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <Modal title="Replace download link" onClose={onClose}>
+    <form onSubmit={submit}>
+      <p className="muted">{job.filename}</p>
+      <label>New URL<input data-initial-focus type="url" value={url} onChange={event => setUrl(event.target.value)} required /></label>
+      {!job.expectedSha256 && <label>Publisher SHA-256 <span>Optional</span>
+        <input value={sha256} onChange={event => setSha256(event.target.value)} spellCheck={false} autoComplete="off" />
+      </label>}
+      <p className="muted">A publisher checksum allows verified parts to carry over to a different source URL when the size and strong ETag match.</p>
+      <FormActions busy={busy} error={error} onClose={onClose} label="Replace and queue" />
+    </form>
+  </Modal>;
 }
 
 function UpdateControls() {
@@ -374,6 +433,8 @@ function ScheduleForm({ runAfter, dailyWindow, onClose, onSave }: {
 function App() {
   const [state, setState] = useState<Snapshot>();
   const [filter, setFilter] = useState<Filter>("all");
+  const [category, setCategory] = useState("");
+  const [replacement, setReplacement] = useState<Job | null>(null);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -398,7 +459,7 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  async function jobAction(command: "retry_download" | "pause_download", id: string) {
+  async function jobAction(command: "retry_download" | "pause_download" | "stop_recording", id: string) {
     setActionError("");
     try {
       await invoke(command, { id });
@@ -420,7 +481,7 @@ function App() {
   }
 
   const jobs = state?.jobs ?? [];
-  const visible = jobs.filter(job => filter === "all" || job.status === filter);
+  const visible = jobs.filter(job => (filter === "all" || job.status === filter) && (!category || fileCategory(job.filename) === category));
   const heading = filters.find(item => item.key === filter)?.label;
   const hostname = (url: string) => new URL(url).hostname;
   const closePanel = () => setPanel(null);
@@ -460,6 +521,12 @@ function App() {
             <CalendarClock size={16} /> Daily queue window {formatTime(state.daily_window.startMinute)}–{formatTime(state.daily_window.endMinute)}
           </button>
         )}
+        <div className="category-filter"><label htmlFor="file-category">File type</label>
+          <select id="file-category" value={category} onChange={event => setCategory(event.target.value)}>
+            <option value="">All types</option>
+            {[...Object.keys(categories), "Other"].map(type => <option key={type}>{type}</option>)}
+          </select>
+        </div>
         <section className="download-list" aria-label={heading}>
           <table>
             <thead><tr><th>File</th><th>Status</th><th>Size</th><th><span className="sr-only">Actions</span></th></tr></thead>
@@ -482,14 +549,18 @@ function App() {
                     {job.transfer && <DownloadProgress transfer={job.transfer} />}
                     {job.error && <small className="error">{job.error}</small>}
                   </td>
-                  <td><span className={`badge ${job.status}`}>{statusLabel[job.status]}</span>
+                  <td><span className={`badge ${job.status}`}>{job.format === "hls_live" && job.status === "downloading" ? "Recording" : statusLabel[job.status]}</span>
                     {job.status === "complete" && job.expectedSha256 && <small>SHA-256 verified</small>}</td>
                   <td className="file-size">
                     {job.bytes > 0 || job.transfer || job.status === "complete" ? displaySize(job.bytes) : "—"}
                     {job.transfer?.totalBytes != null && <small>of {displaySize(job.transfer.totalBytes)}</small>}
                   </td>
                   <td>
-                    {(job.status === "queued" || job.status === "downloading") && (
+                    {job.status === "downloading" && job.format === "hls_live" && (
+                      <button className="icon-button" title="Stop and save recording" aria-label={`Stop and save ${job.filename}`}
+                        onClick={() => void jobAction("stop_recording", job.id)}><Square size={16} /></button>
+                    )}
+                    {(job.status === "queued" || (job.status === "downloading" && job.format !== "hls_live")) && (
                       <button className="icon-button" title="Pause" aria-label={`Pause ${job.filename}`} onClick={() => void jobAction("pause_download", job.id)}><Pause size={16} /></button>
                     )}
                     {(job.status === "paused" || job.status === "failed") && (
@@ -499,6 +570,10 @@ function App() {
                         {job.status === "paused" ? <Play size={16} /> : <RefreshCw size={16} />}
                       </button>
                     )}
+                    {(job.status === "paused" || job.status === "failed") && !job.sha256 && (
+                      <button className="icon-button" title="Replace link" aria-label={`Replace link for ${job.filename}`}
+                        onClick={() => setReplacement(job)}><Link size={16} /></button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -507,8 +582,8 @@ function App() {
           {!visible.length && (
             <div className="empty">
               <span className="empty-icon"><ArrowDownToLine size={26} /></span>
-              <h2>{state ? `No ${filter === "all" ? "" : `${filter === "complete" ? "completed" : "failed"} `}downloads` : loadError ? "Downloads unavailable" : "Loading downloads…"}</h2>
-              {state && filter === "all" && <p>Use Add download to start a transfer from a link.</p>}
+              <h2>{state && category ? "No downloads match this file type" : state ? `No ${filter === "all" ? "" : `${filter === "complete" ? "completed" : "failed"} `}downloads` : loadError ? "Downloads unavailable" : "Loading downloads…"}</h2>
+              {state && filter === "all" && !category && <p>Use Add download to start a transfer from a link.</p>}
             </div>
           )}
         </section>
@@ -516,6 +591,7 @@ function App() {
       </main>
       {panel === "schedule" && state && <ScheduleForm runAfter={state.run_after} dailyWindow={state.daily_window} onClose={closePanel} onSave={refresh} />}
       {panel === "browser" && <BrowserSettings onClose={closePanel} />}
+      {replacement && <ReplaceLink job={replacement} onClose={() => setReplacement(null)} onSave={refresh} />}
       {panel === "add" && <AddDownload onClose={closePanel} onSave={refresh} />}
       {panel === "settings" && state && <SettingsForm settings={state.settings} onClose={closePanel} onSave={refresh} />}
     </div>

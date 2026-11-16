@@ -2685,8 +2685,9 @@ dependencies = [
 
 [[package]]
 name = "outernet"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
  "chrono",
  "dirs 7.0.0",

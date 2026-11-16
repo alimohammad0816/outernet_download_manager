@@ -484,6 +484,7 @@ const RANGE_LENGTH: u64 = PART * 3;
 #[derive(Clone, Copy, PartialEq)]
 enum Scenario {
     Interrupted,
+    Expired,
     Stable,
     Replaced,
     Slow,
@@ -501,6 +502,12 @@ fn range_fixture(state: std::sync::Arc<std::sync::Mutex<RangeState>>) -> Fixture
             state.requests.push(request.clone());
             state.mode
         };
+        if mode == Scenario::Expired {
+            let _ = stream.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
+        }
         if request.starts_with("HEAD ") {
             let _ = write!(stream, "HTTP/1.1 200 OK\r\nETag: \"original\"\r\nAccept-Ranges: bytes\r\nContent-Length: {RANGE_LENGTH}\r\nConnection: close\r\n\r\n");
             return;
@@ -619,6 +626,95 @@ fn reuses_only_verified_ranges_after_restart() {
     assert!(get.iter().any(|request| request
         .to_ascii_lowercase()
         .contains(&format!("range: bytes={PART}-"))));
+}
+
+#[test]
+fn batch_is_atomic_and_reserves_distinct_filenames() {
+    let (_root, _destination, _, _, store) = setup(None);
+    let first = "https://example.test/first/file.zip".to_string();
+    let second = "https://example.test/second/file.zip".to_string();
+    assert!(store
+        .add_batch(vec![
+            (first.clone(), "file.zip".into()),
+            ("invalid".into(), "file.zip".into())
+        ])
+        .is_err());
+    assert!(store.snapshot().unwrap().jobs.is_empty());
+    store
+        .add_batch(vec![
+            (first.clone(), "file.zip".into()),
+            (second.clone(), "file.zip".into()),
+        ])
+        .unwrap();
+    let jobs = store.snapshot().unwrap().jobs;
+    assert_eq!(
+        (jobs[1].url.as_str(), jobs[1].filename.as_str()),
+        (first.as_str(), "file.zip")
+    );
+    assert_eq!(
+        (jobs[0].url.as_str(), jobs[0].filename.as_str()),
+        (second.as_str(), "file (2).zip")
+    );
+}
+
+#[test]
+fn replacing_a_link_reuses_checkpoint_with_publisher_hash() {
+    let (_root, _destination, _, settings, store) = setup(None);
+    let server = std::sync::Arc::new(std::sync::Mutex::new(RangeState {
+        mode: Scenario::Interrupted,
+        requests: vec![],
+    }));
+    let fixture = range_fixture(server.clone());
+    let hash = expected(RANGE_LENGTH, 29);
+    store
+        .add(
+            fixture.url("file.zip?token=expired"),
+            "file.zip".into(),
+            String::new(),
+        )
+        .unwrap();
+    store.process_next().unwrap();
+    let failed = job(&store);
+    assert!(failed.status == Status::Failed);
+    server.lock().unwrap().mode = Scenario::Expired;
+    store.retry(failed.id.clone()).unwrap();
+    store.process_next().unwrap();
+    let expired = job(&store);
+    assert!(expired.status == Status::Failed);
+    assert!(expired
+        .error
+        .unwrap()
+        .contains("Completed parts were kept."));
+    {
+        let mut server = server.lock().unwrap();
+        server.mode = Scenario::Stable;
+        server.requests.clear();
+    }
+    store
+        .replace_link(
+            failed.id,
+            fixture.url("file.zip?token=fresh"),
+            Some(hash.clone()),
+        )
+        .unwrap();
+    store.process_next().unwrap();
+    assert!(
+        job(&store).status == Status::Complete,
+        "{:?}",
+        job(&store).error
+    );
+    assert_eq!(
+        transfer::sha256(&settings.destination_folder.join("file.zip")).unwrap(),
+        hash
+    );
+    let server = server.lock().unwrap();
+    let gets = server
+        .requests
+        .iter()
+        .filter(|request| request.starts_with("GET "))
+        .collect::<Vec<_>>();
+    assert_eq!(gets.len(), 1);
+    assert!(gets[0].starts_with("GET /file.zip?token=fresh "));
 }
 
 #[test]
@@ -923,6 +1019,49 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     fs::write(local.path().join("hls/master.m3u8"),
         "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=160x120\nvideo.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080\nmissing-1080p.m3u8\n"
     ).unwrap();
+    let hls = local.path().join("hls");
+    let encrypted = hls.join("encrypted");
+    fs::create_dir(&encrypted).unwrap();
+    use aws_lc_rs::{
+        cipher::{EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey, AES_128},
+        iv::FixedLength,
+    };
+    let original = fs::read_to_string(hls.join("video.m3u8")).unwrap();
+    let mut encrypted_manifest =
+        original.replace("#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-MEDIA-SEQUENCE:11");
+    assert!(encrypted_manifest.contains("#EXT-X-MEDIA-SEQUENCE:11"));
+    for (number, key_byte, iv) in [(0, 23, 11_u128), (1, 49, 42_u128), (2, 49, 42_u128)] {
+        let filename = format!("video{number}.ts");
+        let mut bytes = fs::read(hls.join(&filename)).unwrap();
+        let key_bytes = [key_byte; 16];
+        let key = UnboundCipherKey::new(&AES_128, &key_bytes).unwrap();
+        let key = PaddedBlockEncryptingKey::cbc_pkcs7(key).unwrap();
+        key.less_safe_encrypt(
+            &mut bytes,
+            EncryptionContext::Iv128(FixedLength::from(iv.to_be_bytes())),
+        )
+        .unwrap();
+        fs::write(encrypted.join(&filename), &bytes).unwrap();
+        if number < 2 {
+            let iv = if number == 0 {
+                String::new()
+            } else {
+                format!(",IV=0x{iv:x}")
+            };
+            fs::write(encrypted.join(format!("key{number}")), key_bytes).unwrap();
+            let marker = format!("#EXT-X-KEY:METHOD=AES-128,URI=\"key{number}\"{iv}\n");
+            // The key tag applies to the segment that follows this duration.
+            encrypted_manifest =
+                encrypted_manifest.replace(&filename, &format!("{marker}{filename}"));
+        }
+    }
+    fs::write(encrypted.join("video.m3u8"), &encrypted_manifest).unwrap();
+    fs::write(encrypted.join("wrong-key"), [73; 16]).unwrap();
+    fs::write(
+        encrypted.join("wrong.m3u8"),
+        encrypted_manifest.replace("key1", "wrong-key"),
+    )
+    .unwrap();
     let range_directory = local.path().join("hls-range");
     let range_playlist = fs::read_to_string(range_directory.join("video.m3u8")).unwrap();
     assert!(range_playlist.contains("#EXT-X-MAP:") && range_playlist.contains("#EXT-X-BYTERANGE:"));
@@ -948,6 +1087,16 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
         implicit.replace("video.m4s", "changed.m4s"),
     )
     .unwrap();
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let live_updates = Arc::new(AtomicUsize::new(0));
+    let live_requests = Arc::clone(&live_updates);
+    let gap_updates = AtomicUsize::new(0);
+    let second_attempts = AtomicUsize::new(0);
+    let first_live_bytes = fs::metadata(hls.join("video0.ts")).unwrap().len();
+    let second_live_bytes = fs::metadata(hls.join("video1.ts")).unwrap().len();
     let root = local.path().to_owned();
     let fixture = Fixture::start(move |mut stream, request| {
         let name = request
@@ -955,6 +1104,37 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
             .nth(1)
             .unwrap()
             .trim_start_matches('/');
+        if name == "live.m3u8" || name == "gap.m3u8" {
+            let gap = name == "gap.m3u8";
+            let requests = if gap { &gap_updates } else { &live_requests };
+            let update = requests.fetch_add(1, Ordering::Relaxed);
+            let sequence = if gap && update > 0 { 93 } else { 91 };
+            let segments = if update == 0 {
+                "#EXTINF:1.0,\n/hls/video0.ts\n"
+            } else if gap {
+                "#EXTINF:1.0,\n/hls/video2.ts\n"
+            } else {
+                "#EXTINF:1.0,\n/hls/video0.ts\n#EXTINF:1.0,\n/hls/video1.ts?transient\n"
+            };
+            let body = format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n{segments}"
+            );
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            return;
+        }
+        let name = if name == "hls/video1.ts?transient" {
+            if second_attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                return;
+            }
+            "hls/video1.ts"
+        } else {
+            name
+        };
         let changed = name.ends_with("/changed.m4s");
         let path = root.join(if changed { "hls-range/video.m4s" } else { name });
         if let Ok(bytes) = fs::read(path) {
@@ -999,6 +1179,7 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     });
     for (input, output) in [
         ("hls/master.m3u8", "hls.mkv"),
+        ("hls/encrypted/video.m3u8", "hls-encrypted.mkv"),
         ("hls-range/implicit.m3u8", "hls-range.mkv"),
         ("dash/video.mpd", "dash.mkv"),
     ] {
@@ -1027,6 +1208,66 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
         let streams = String::from_utf8(probe.stdout).unwrap();
         assert!(probe.status.success() && streams.contains("video") && streams.contains("audio"));
     }
+    let decoded_hash = |name: &str| {
+        let result = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(settings.destination_folder.join(name))
+            .args(["-map", "0:v:0", "-map", "0:a:0", "-f", "hash", "-"])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        result.stdout
+    };
+    assert_eq!(decoded_hash("hls.mkv"), decoded_hash("hls-encrypted.mkv"));
+    store
+        .add_from_browser(
+            fixture.url("live.m3u8"),
+            "record.mkv".into(),
+            Some(media::Format::HlsLive),
+            None,
+        )
+        .unwrap();
+    let store = Arc::new(store);
+    let live_id = job(&store).id;
+    let (done, completed) = std::sync::mpsc::channel();
+    assert!(store
+        .start_next(move |job| {
+            let _ = done.send(job);
+        })
+        .unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    while job(&store).bytes < first_live_bytes + second_live_bytes {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "recording did not receive both segments: {:?}",
+            job(&store).error
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    store.stop_recording(live_id).unwrap();
+    assert!(
+        completed
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .status
+            == Status::Complete
+    );
+    assert!(live_updates.load(Ordering::Relaxed) >= 3);
+    assert!(settings.destination_folder.join("record.mkv").is_file());
+
+    store
+        .add_from_browser(
+            fixture.url("gap.m3u8"),
+            "gap.mkv".into(),
+            Some(media::Format::HlsLive),
+            None,
+        )
+        .unwrap();
+    store.process_next().unwrap();
+    let gap = job(&store);
+    assert!(gap.status == Status::Failed);
+    assert!(gap.error.unwrap().contains("lost one or more segments"));
+    assert!(!settings.destination_folder.join("gap.mkv").exists());
     let dash_segment = fs::read_dir(local.path().join("dash"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -1040,6 +1281,7 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
     fs::remove_file(dash_segment).unwrap();
     fs::remove_file(local.path().join("hls/video1.ts")).unwrap();
     for (url, filename) in [
+        ("hls/encrypted/wrong.m3u8", "wrong-key.mkv"),
         ("hls-range/changed.m3u8", "hls-changed.mkv"),
         ("dash/video.mpd", "dash-incomplete.mkv"),
         ("hls/video.m3u8", "hls-incomplete.mkv"),
