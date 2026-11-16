@@ -523,12 +523,13 @@ function toMinutes(clock: string) {
   return hours * 60 + minutes;
 }
 
-function ChoicePicker<T extends string>({ value, onChange, options, label, icon }: {
-  value: T; onChange: (value: T) => void; options: ReadonlyArray<readonly [T, string]>; label: string; icon?: ReactNode;
+function ChoicePicker<T extends string>({ value, onChange, options, label, icon, fitWorkspace = false }: {
+  value: T; onChange: (value: T) => void; options: ReadonlyArray<readonly [T, string]>; label: string; icon?: ReactNode; fitWorkspace?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const id = useId();
   const selected = options.find(([key]) => key === value)?.[1];
   useEffect(() => {
@@ -539,6 +540,30 @@ function ChoicePicker<T extends string>({ value, onChange, options, label, icon 
     window.addEventListener("pointerdown", dismiss);
     return () => window.removeEventListener("pointerdown", dismiss);
   }, [expanded]);
+  useLayoutEffect(() => {
+    if (!expanded || !fitWorkspace) return;
+    const button = trigger.current;
+    const popup = menu.current;
+    const workspace = button?.closest("main");
+    if (!button || !popup || !workspace) return;
+    const placeMenu = () => {
+      const anchor = button.getBoundingClientRect();
+      const bounds = workspace.getBoundingClientRect();
+      const below = bounds.bottom - anchor.bottom - 12;
+      const above = anchor.top - bounds.top - 12;
+      const desired = Math.min(popup.scrollHeight + 2, 268);
+      const opensAbove = below < desired && above > below;
+      popup.dataset.side = opensAbove ? "top" : "bottom";
+      popup.style.maxHeight = `${Math.max(0, Math.min(desired, opensAbove ? above : below))}px`;
+    };
+    placeMenu();
+    window.addEventListener("resize", placeMenu);
+    workspace.addEventListener("scroll", placeMenu);
+    return () => {
+      window.removeEventListener("resize", placeMenu);
+      workspace.removeEventListener("scroll", placeMenu);
+    };
+  }, [expanded, fitWorkspace, options.length]);
   return (
     <div className="category-picker" ref={root} onBlur={event => {
       if (!event.currentTarget.contains(event.relatedTarget)) setExpanded(false);
@@ -552,7 +577,7 @@ function ChoicePicker<T extends string>({ value, onChange, options, label, icon 
         aria-label={`${label}: ${selected}`} onClick={() => setExpanded(!expanded)}>
         {icon}<span>{selected}</span><ChevronDown size={14} />
       </button>
-      {expanded && <div className="picker-menu" id={id} role="group" aria-label={label}>
+      {expanded && <div className="picker-menu" ref={menu} id={id} role="group" aria-label={label}>
         {options.map(([key, text]) => (
           <button type="button" key={key} aria-pressed={key === value} onClick={() => {
             onChange(key);
@@ -1077,13 +1102,13 @@ function App() {
             ))}
           </nav>
           <div className="filter-actions">
-          <ChoicePicker<SortKey> value={sort} onChange={key => { setSort(key); setAscending(key === "name" || key === "status"); }} label="Sort by"
+          <ChoicePicker<SortKey> value={sort} onChange={key => { setSort(key); setAscending(key === "name" || key === "status"); }} label="Sort by" fitWorkspace
             options={[["date", "Date added"], ["name", "Name"], ["size", "Size"], ["status", "Status"], ["priority", "Priority"]]} />
           <button className="icon-button" type="button" title={ascending ? "Ascending" : "Descending"}
             aria-label={ascending ? "Switch to descending sort" : "Switch to ascending sort"} onClick={() => setAscending(!ascending)}>
             {ascending ? <ArrowUp size={15} /> : <ArrowDown size={15} />}
           </button>
-          <ChoicePicker value={category} onChange={setCategory} label="File type" icon={<ListFilter size={15} />}
+          <ChoicePicker value={category} onChange={setCategory} label="File type" fitWorkspace icon={<ListFilter size={15} />}
             options={[["", "All types"], ...[...Object.keys(categories), "Other"].map(type => [type, type] as const)]} />
           </div>
         </div>

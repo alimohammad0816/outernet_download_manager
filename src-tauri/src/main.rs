@@ -213,7 +213,8 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
         .text("show", "Open Outernet")
         .text("quit", "Quit Outernet")
         .build()?;
-    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(tauri::include_image!("icons/tray.png"))
         .menu(&menu)
         .tooltip("Outernet Download Manager")
         .show_menu_on_left_click(false)
@@ -233,11 +234,8 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
             ) {
                 show_main(tray.app_handle());
             }
-        });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
-    tray.build(app)?;
+        })
+        .build(app)?;
     Ok(())
 }
 

@@ -252,6 +252,8 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
 .resize-southwest { bottom: 0; left: 0; cursor: nesw-resize; }
 .queue-header { align-items: center; margin-bottom: 9px; }
 .queue-selector, .queue-actions, .filter-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.filter-actions .picker-menu { inset-inline: auto 0; }
+.filter-actions .picker-menu[data-side="top"] { inset-block: auto calc(100% + 6px); }
 .queue-selector .picker-trigger { max-width: min(37vw, 290px); }
 .queue-selector .picker-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 13px; color: var(--muted); font-size: 12px; }
