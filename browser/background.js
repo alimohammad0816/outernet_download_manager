@@ -160,7 +160,11 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
     const key = `streams:${tabId}`;
     void (networkOperations.get(tabId) ?? Promise.resolve())
       .then(() => api.storage.session.get([key, `result:${tabId}`])).then(data => {
-      const video = youtubeSource(extensionPage ? message.pageUrl : sender.url);
+      const playerPage = webUrl(extensionPage ? message.pageUrl : sender.url);
+      const requestedPage = webUrl(message.pageUrl);
+      const currentPage = playerPage && requestedPage
+        && new URL(playerPage).origin === new URL(requestedPage).origin ? requestedPage : playerPage;
+      const video = youtubeSource(currentPage);
       const items = data[key] ?? [];
       const seen = new Set();
       respond({

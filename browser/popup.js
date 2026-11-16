@@ -5,7 +5,7 @@ const list = document.querySelector("#streams");
 const qualities = Array.from(document.querySelectorAll("#quality button"));
 const automatic = document.querySelector("#automatic");
 const { maxHeight, automaticHandoff } = await api.storage.local.get(["maxHeight", "automaticHandoff"]);
-automatic.checked = Boolean(automaticHandoff);
+automatic.checked = automaticHandoff !== false;
 automatic.addEventListener("change", () => {
   void api.storage.local.set({ automaticHandoff: automatic.checked });
 });

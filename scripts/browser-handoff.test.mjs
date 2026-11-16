@@ -225,3 +225,56 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
     delete globalThis.chrome;
   }
 });
+
+test("a trusted file click opens Outernet and restores the browser link if the host is unreachable", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { runInNewContext } = await import("node:vm");
+  const script = await readFile(new globalThis.URL("../browser/click-download.js", import.meta.url), "utf8");
+  class Anchor {
+    attributes = new Map();
+    hasAttribute(key) { return this.attributes.has(key); }
+    getAttribute(key) { return this.attributes.get(key); }
+    setAttribute(key, value) { this.attributes.set(key, value); }
+    click() { opened.push(this.href); }
+    remove() {}
+  }
+  const opened = [];
+  const sent = [];
+  const storageChanges = signal();
+  let redirectToBrowser = false;
+  let click;
+  runInNewContext(script, {
+    URL: globalThis.URL,
+    HTMLAnchorElement: Anchor,
+    document: {
+      addEventListener(_name, handler) { click = handler; },
+      documentElement: { append() {} },
+      createElement() { return new Anchor(); },
+    },
+    chrome: {
+      storage: { local: { async get() { return {}; } }, onChanged: storageChanges },
+      runtime: { async sendMessage(message) { sent.push(message); return { ok: !redirectToBrowser }; } },
+    },
+  });
+  await wait(0);
+  const link = new Anchor();
+  const event = { button: 0, isTrusted: true, defaultPrevented: false, composedPath: () => [link],
+    preventDefault() { this.defaultPrevented = true; } };
+
+  link.href = "https://example.test/download";
+  await click(event);
+  assert.equal(sent.length, 0);
+  link.setAttribute("download", "archive.zip");
+  await click(event);
+  assert.equal(sent[0].filename, "archive.zip");
+  assert.equal(event.defaultPrevented, true);
+
+  redirectToBrowser = true;
+  await click({ ...event, defaultPrevented: false });
+  assert.deepEqual(opened, [link.href]);
+
+  await click({ ...event, defaultPrevented: false, altKey: true });
+  storageChanges.emit({ automaticHandoff: { newValue: false } }, "local");
+  await click({ ...event, defaultPrevented: false });
+  assert.equal(sent.length, 2);
+});

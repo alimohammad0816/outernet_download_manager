@@ -200,7 +200,7 @@ export function trackDownloads(api, host) {
     const key = `${PAUSED_PREFIX}${id}`;
     let marked = false;
     try {
-      if (!(await api.storage.local.get("automaticHandoff")).automaticHandoff) return;
+      if ((await api.storage.local.get("automaticHandoff")).automaticHandoff === false) return;
       const [item] = await api.downloads.search({ id });
       if (!item || item.incognito || item.paused || item.state !== "in_progress"
           || item.byExtensionId || (item.cookieStoreId && item.cookieStoreId !== "firefox-default")
@@ -218,6 +218,7 @@ export function trackDownloads(api, host) {
       await receiveWithBrowser(api, host, url, {
         filename,
         expected,
+        interactive: true,
         async onReady() {
           const [current] = await api.downloads.search({ id });
           if (current?.state !== "in_progress" || current.paused || !["safe", "accepted"].includes(current.danger)) {
@@ -228,7 +229,7 @@ export function trackDownloads(api, host) {
           await api.downloads.pause(id);
         },
       });
-      // The desktop acknowledgment means all bytes are durably stored and queued.
+      // The desktop acknowledges only after the complete response is durably staged.
       await api.downloads.cancel(id);
       await api.storage.local.remove(key);
     } catch {
@@ -260,7 +261,7 @@ export function trackDownloads(api, host) {
   // Firefox can announce the download before WebRequest supplies its attachment headers.
   return url => {
     void (async () => {
-      if (!(await api.storage.local.get("automaticHandoff")).automaticHandoff) return;
+      if ((await api.storage.local.get("automaticHandoff")).automaticHandoff === false) return;
       const downloads = await api.downloads.search({ state: "in_progress", url });
       for (const item of downloads) {
         if (item.url === url) void attempt(item.id);

@@ -7,7 +7,7 @@ const target = process.argv[2];
 if (!target) throw new Error("Provide a destination for the browser packages.");
 const manifest = JSON.parse(await readFile(join(sources, "manifest.json"), "utf8"));
 const firefoxId = (await readFile(new URL("../src-tauri/firefox-extension-id", import.meta.url), "utf8")).trim();
-const files = ["background.js", "handoff.js", "popup.js", "popup.html", "popup.css", "video.js", "icon-16.png", "icon-32.png", "icon-48.png", "icon.png"];
+const files = ["background.js", "handoff.js", "popup.js", "popup.html", "popup.css", "video.js", "click-download.js", "icon-16.png", "icon-32.png", "icon-48.png", "icon.png"];
 
 for (const browser of ["chromium", "chromium-store", "firefox"]) {
   const directory = join(target, browser);

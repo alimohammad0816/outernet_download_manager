@@ -58,13 +58,17 @@ and supports direct files. Websites that issue a POST, require a page-issued
 authorization header, or serve protected segmented media still use the
 browser's normal download flow.
 
-Enable **Automatically take over eligible downloads** in the extension popup
-to transfer matching browser downloads. This covers attachment GETs of at
-least 1 MiB with an allowed extension, a strong ETag, and matching length and
-media type. Outernet validates the second response before pausing the original,
-and the extension cancels the original only after the desktop confirms that
-the complete body is durably queued. If the handoff fails, the extension
-resumes the original when the browser can resume it.
+**Take over eligible downloads** is on by default. A regular click on a
+recognized file link, including links marked as downloads by the site, opens
+the Outernet dialog straight away. Hold **Alt** while clicking to leave a
+link with the browser, or turn the switch off in the extension popup.
+
+For other eligible downloads, the extension can verify and stage an attachment
+GET with a strong ETag, matching length and media type, and at least 1 MiB of
+data. It pauses the browser download only after verifying the response and
+cancels it after Outernet acknowledges the complete staged file. The Outernet
+dialog then lets you choose where and when to save it. If staging fails, the
+extension resumes the original when the browser can resume it.
 
 Video support covers finished HLS with discrete segments or byte ranges and
 static single-period DASH with fragmented MP4 SegmentTemplates. HLS byte

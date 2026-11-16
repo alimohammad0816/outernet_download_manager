@@ -5,19 +5,32 @@
   const shadow = container.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
   style.textContent = `
-    button { color:#fafafa; background:#141819; border:1px solid #394a46; border-radius:7px; padding:7px 11px;
-      font:600 13px system-ui,sans-serif; cursor:pointer; box-shadow:0 2px 8px #0005 }
+    button { color:#f5f6f6; background:#111315; border:1px solid #3b4245; border-radius:7px;
+      padding:6px 10px; font:600 12px system-ui,sans-serif; cursor:pointer }
     button:focus-visible { outline:2px solid #9ae3ca; outline-offset:2px }
     button:disabled { opacity:.75; cursor:wait }
-    .choices { margin-top:4px; display:grid; gap:3px; max-width:220px }
-    .choices button:hover { background:#25332f; color:#b4efda }
+    .launcher { box-shadow:0 2px 10px #0007; white-space:nowrap }
+    .launcher::before { content:"↓"; margin-right:6px; color:#99dfc7 }
+    .choices { position:absolute; inset:calc(100% + 4px) 0 auto auto; width:min(218px, 90vw);
+      box-sizing:border-box; max-height:var(--menu-height, 260px); overflow:auto;
+      display:grid; gap:2px; padding:4px; border:1px solid #3b4245; border-radius:9px;
+      background:#111315; box-shadow:0 8px 22px #0009 }
     .choices:empty { display:none }
-    .choices button { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left }
+    .choices button { border-color:transparent; text-overflow:ellipsis; white-space:nowrap;
+      overflow:hidden; text-align:left; font-weight:500; min-height:30px }
+    .choices button:hover { background:#252b2d }
   `;
   const button = document.createElement("button");
+  button.className = "launcher";
+  button.type = "button";
   button.textContent = "Download this video";
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("aria-controls", "outernet-video-choices");
   const choices = document.createElement("div");
   choices.className = "choices";
+  choices.id = "outernet-video-choices";
+  choices.setAttribute("role", "group");
+  choices.setAttribute("aria-label", "Download options");
   shadow.append(style, button, choices);
   document.documentElement.append(container);
 
@@ -28,6 +41,23 @@
   let streamsPage = location.href;
   let pending = false;
   let messageTimeout;
+
+  function closeMenu() {
+    choices.replaceChildren();
+    button.setAttribute("aria-expanded", "false");
+  }
+
+  document.addEventListener("pointerdown", event => {
+    if (!event.composedPath().includes(container)) closeMenu();
+  }, true);
+  shadow.addEventListener("keydown", event => {
+    if (event.key === "Escape" && choices.childElementCount) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+      button.focus();
+    }
+  });
 
   function directSource(video) {
     try {
@@ -45,11 +75,11 @@
     if (streamsPage !== location.href) {
       streamsPage = location.href;
       streams = [];
-      choices.replaceChildren();
+      closeMenu();
     }
     const videos = [...document.querySelectorAll("video")].filter(video => {
       const rect = video.getBoundingClientRect();
-      return video.currentSrc && rect.width >= 120 && rect.height >= 70
+      return (video.currentSrc || streams.some(stream => stream.format === "youtube")) && rect.width >= 120 && rect.height >= 70
         && rect.bottom >= 48 && rect.top < innerHeight - 48
         && rect.right > 0 && rect.left < innerWidth;
     });
@@ -57,7 +87,7 @@
     if (video !== activeVideo || video?.currentSrc !== activeUrl) {
       activeVideo = video;
       activeUrl = video?.currentSrc;
-      choices.replaceChildren();
+      closeMenu();
     }
     const direct = video ? directSource(video) : null;
     activeSource = streams.find(stream => stream.format === "youtube")
@@ -68,14 +98,18 @@
     }
     const rect = video.getBoundingClientRect();
     container.style.display = "block";
-    container.style.left = `${Math.max(5, Math.min(innerWidth - 205, rect.right - container.offsetWidth - 10))}px`;
-    container.style.top = `${Math.max(5, rect.top + 10)}px`;
+    const top = Math.max(6, rect.top > 39 ? rect.top - button.offsetHeight - 5 : rect.top + 8);
+    const right = Math.min(innerWidth - 6, Math.max(button.offsetWidth + 6, rect.right - 8));
+    container.style.left = `${right - button.offsetWidth}px`;
+    container.style.top = `${top}px`;
+    container.style.setProperty("--menu-height", `${Math.max(36, Math.min(268, innerHeight - top - button.offsetHeight - 11))}px`);
+    if (choices.childElementCount) choices.style.right = `${Math.min(0, right - choices.offsetWidth - 6)}px`;
   }
 
   async function send(source) {
     window.clearTimeout(messageTimeout);
     pending = true;
-    choices.replaceChildren();
+    closeMenu();
     button.disabled = true;
     button.textContent = "Sending…";
     try {
@@ -96,24 +130,26 @@
 
   function addChoice(label, action) {
     const option = document.createElement("button");
+    option.type = "button";
     option.textContent = label;
     option.title = label;
     option.addEventListener("click", event => {
       if (event.isTrusted && !pending) action();
     });
     choices.append(option);
+    position();
+    button.setAttribute("aria-expanded", "true");
   }
 
   function chooseQuality(source) {
+    closeMenu();
     if (source.format === "file") {
-      void send(source);
+      addChoice("Download video file", () => void send(source));
       return;
     }
-    choices.replaceChildren();
     if (source.format === "hls") {
       addChoice("Record live in Outernet", () => void send({ ...source, format: "hls_live" }));
     }
-    addChoice("Use extension preference", () => void send(source));
     for (const [height, label] of [[0, "Best available"], [1080, "Up to 1080p"], [720, "Up to 720p"], [480, "Up to 480p"], [360, "Up to 360p"]]) {
       addChoice(label, () => void send({ ...source, maxHeight: height }));
     }
@@ -122,7 +158,7 @@
   button.addEventListener("click", event => {
     if (!event.isTrusted || pending) return;
     if (choices.childElementCount) {
-      choices.replaceChildren();
+      closeMenu();
       return;
     }
     if (activeSource) {
@@ -143,7 +179,7 @@
     position();
     if (++tick % 3 !== 1 || !document.querySelector("video")) return;
     const page = location.href;
-    void api.runtime.sendMessage({ action: "streams" }).then(result => {
+    void api.runtime.sendMessage({ action: "streams", pageUrl: page }).then(result => {
       if (page !== location.href) return;
       streams = result?.streams ?? [];
       position();
