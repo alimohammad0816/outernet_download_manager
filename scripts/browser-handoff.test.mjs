@@ -253,7 +253,7 @@ test("a trusted file click opens Outernet and restores the browser link if the h
     },
     chrome: {
       storage: { local: { async get() { return {}; } }, onChanged: storageChanges },
-      runtime: { async sendMessage(message) { sent.push(message); return { ok: !redirectToBrowser }; } },
+      runtime: { id: "outernet", async sendMessage(message) { sent.push(message); return { ok: !redirectToBrowser }; } },
     },
   });
   await wait(0);

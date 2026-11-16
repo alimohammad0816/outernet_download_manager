@@ -979,8 +979,9 @@ impl Store {
                     && !job.removing
                     && snapshot.queues.iter().any(|queue| {
                         queue.id == job.queue_id
-                            && occupied.get(queue.id.as_str()).copied().unwrap_or(0)
-                                < usize::from(queue.slots)
+                            && (job.immediate
+                                || occupied.get(queue.id.as_str()).copied().unwrap_or(0)
+                                    < usize::from(queue.slots))
                             && (job.status == Status::Ready
                                 || (job.status == Status::Queued
                                     && !job.deferred

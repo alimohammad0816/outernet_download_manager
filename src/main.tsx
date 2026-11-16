@@ -1,4 +1,4 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowDown, ArrowDownToLine, ArrowUp, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, File, FolderOpen, Globe, ListFilter, Layers, Link, Minus, MoreHorizontal, Pause, Play, Plus, RefreshCw, Settings2, Square, X } from "lucide-react";
@@ -256,6 +256,27 @@ function SingleDownload({ draftId, initialQueue }: { draftId: string | null; ini
   const folder = destination ?? state?.settings.destinationFolder ?? "";
   const queue = state?.queues.find(item => item.id === queueId) ?? state?.queues[0];
   const appWindow = getCurrentWindow();
+  const content = useRef<HTMLDivElement>(null);
+  const contentReady = Boolean(state || loadError);
+
+  useLayoutEffect(() => {
+    const element = content.current;
+    const viewport = element?.parentElement;
+    if (!contentReady || !element || !viewport) return;
+    const appWindow = getCurrentWindow();
+    let requestedHeight = 0;
+    const observer = new ResizeObserver(() => {
+      const { paddingTop, paddingBottom } = getComputedStyle(viewport);
+      const chromeHeight = viewport.getBoundingClientRect().top + parseFloat(paddingTop) + parseFloat(paddingBottom) + 1;
+      const availableHeight = Math.max(220, Math.min(540, screen.availHeight - 80));
+      const height = Math.max(220, Math.min(availableHeight, Math.ceil(element.offsetHeight + chromeHeight)));
+      if (height === requestedHeight || Math.abs(height - innerHeight) <= 1) return;
+      requestedHeight = height;
+      void appWindow.setSize(new LogicalSize(innerWidth, height)).catch(() => {});
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [contentReady]);
 
   useEffect(() => {
     let closed = false;
@@ -321,6 +342,7 @@ function SingleDownload({ draftId, initialQueue }: { draftId: string | null; ini
       <WindowControls onError={setError} />
     </header>
     <main>
+      <div className="single-content" ref={content}>
       <h2>{heading}</h2>
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
       {missing ? <p className="muted">This download is no longer in the list.</p>
@@ -367,6 +389,7 @@ function SingleDownload({ draftId, initialQueue }: { draftId: string | null; ini
             <button type="submit" value="later" className="button secondary" disabled={busy}>Download later</button>
           </div>
         </form> : <p className="muted">Loading download…</p>}
+      </div>
     </main>
   </div>;
 }

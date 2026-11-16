@@ -1,0 +1,5 @@
+{
+  "identifier": "download-resize",
+  "windows": ["download-*"],
+  "permissions": ["core:window:allow-set-size"]
+}

@@ -14,7 +14,7 @@
   });
 
   document.addEventListener("click", async event => {
-    if (!enabled || api.extension?.inIncognitoContext || !event.isTrusted || event.defaultPrevented
+    if (!enabled || !api.runtime?.id || api.extension?.inIncognitoContext || !event.isTrusted || event.defaultPrevented
       || event.button !== 0 || event.ctrlKey || event.shiftKey || event.metaKey || event.altKey) return;
     const link = event.composedPath().find(element => element instanceof HTMLAnchorElement);
     if (!link?.href || link.hasAttribute("ping")) return;

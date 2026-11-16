@@ -95,8 +95,8 @@ and verifying the MKV.
 
 **Add download** and direct links sent by the browser extension open a separate
 window. Choose a download queue and destination folder, which starts with the
-default from Settings. **Download now** starts a transfer as soon as the chosen
-queue has an available slot. **Download later** saves the item until the queue
+default from Settings. **Download now** starts a manual transfer immediately using the chosen queue’s network settings. The
+simultaneous-download limit still applies to transfers started by the queue. **Download later** saves the item until the queue
 is started or you explicitly start that item. The same window shows progress
 and gives you **Open file**, **Open folder**, and **Close** when finished.
 Use **Add multiple links** for a batch. When you send a link using the browser

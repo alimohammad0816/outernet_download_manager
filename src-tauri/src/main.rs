@@ -387,7 +387,7 @@ fn download_window(app: &AppHandle, id: Option<&str>, queue_id: &str) -> Result<
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title("Outernet · Download")
         .inner_size(520.0, 490.0)
-        .min_inner_size(440.0, 370.0)
+        .min_inner_size(440.0, 220.0)
         .decorations(false)
         .transparent(true)
         .shadow(false)

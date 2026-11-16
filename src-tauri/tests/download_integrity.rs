@@ -1756,3 +1756,59 @@ fn removing_active_download_waits_for_the_worker_and_preserves_existing_destinat
     store.remove_download(&job(&store).id).unwrap();
     assert!(store.snapshot().unwrap().jobs.is_empty());
 }
+
+#[test]
+fn explicit_download_now_can_start_two_jobs_in_a_one_slot_queue() {
+    let (_root, destination, _database, _settings, store) = setup(None);
+    let store = std::sync::Arc::new(store);
+    let (requests, received) = std::sync::mpsc::channel();
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let response_gate = gate.clone();
+    let server = Fixture::start(move |mut stream, raw| {
+        if raw.starts_with("HEAD ") {
+            let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        let _ = requests.send(());
+        let (open, wake) = &*response_gate;
+        let _guard = wake
+            .wait_timeout_while(open.lock().unwrap(), Duration::from_secs(5), |open| !*open)
+            .unwrap();
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata");
+    });
+    for name in ["first.bin", "second.bin"] {
+        store
+            .submit_download(
+                None,
+                server.url(name),
+                name.into(),
+                String::new(),
+                store::DEFAULT_QUEUE,
+                destination.path().to_owned(),
+                true,
+            )
+            .unwrap();
+        assert!(store.start_next(|_| {}).unwrap());
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    store
+        .add(server.url("queued.bin"), "queued.bin".into(), String::new())
+        .unwrap();
+    assert!(!store.start_next(|_| {}).unwrap());
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while store.while_workers_idle(|| Ok(())).is_err() {
+        assert!(std::time::Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read(destination.path().join("first.bin")).unwrap(),
+        b"data"
+    );
+    assert_eq!(
+        fs::read(destination.path().join("second.bin")).unwrap(),
+        b"data"
+    );
+}

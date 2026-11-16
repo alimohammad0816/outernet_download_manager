@@ -41,6 +41,7 @@
   let streamsPage = location.href;
   let pending = false;
   let messageTimeout;
+  const listeners = new AbortController();
 
   function closeMenu() {
     choices.replaceChildren();
@@ -49,7 +50,7 @@
 
   document.addEventListener("pointerdown", event => {
     if (!event.composedPath().includes(container)) closeMenu();
-  }, true);
+  }, { capture: true, signal: listeners.signal });
   shadow.addEventListener("keydown", event => {
     if (event.key === "Escape" && choices.childElementCount) {
       event.preventDefault();
@@ -116,12 +117,13 @@
       const result = await api.runtime.sendMessage({ action: "download", ...source });
       button.textContent = result.ok ? (result.popup ? "Opening download window…" : "Added to Outernet") : "Could not open download";
       button.title = result.error || "";
-    } catch {
+    } catch (error) {
+      if (contextInvalidated(error)) disconnect();
       button.textContent = "Outernet unavailable";
     } finally {
       button.disabled = false;
       pending = false;
-      messageTimeout = window.setTimeout(() => {
+      if (!listeners.signal.aborted) messageTimeout = window.setTimeout(() => {
         button.textContent = "Download this video";
         button.title = "";
       }, 3500);
@@ -174,18 +176,35 @@
     }
   });
 
-  let tick = 0;
-  window.setInterval(() => {
-    position();
-    if (++tick % 3 !== 1 || !document.querySelector("video")) return;
-    const page = location.href;
-    void api.runtime.sendMessage({ action: "streams", pageUrl: page }).then(result => {
+  function contextInvalidated(error) {
+    return String(error).includes("Extension context invalidated") || !api.runtime?.id;
+  }
+
+  function disconnect() {
+    window.clearInterval(poll);
+    window.clearTimeout(messageTimeout);
+    listeners.abort();
+    container.remove();
+  }
+
+  async function pollStreams(page) {
+    try {
+      const result = await api.runtime.sendMessage({ action: "streams", pageUrl: page });
       if (page !== location.href) return;
       streams = result?.streams ?? [];
       position();
-    }).catch(() => {});
+    } catch (error) {
+      if (contextInvalidated(error)) disconnect();
+    }
+  }
+
+  let tick = 0;
+  const poll = window.setInterval(() => {
+    position();
+    if (++tick % 3 !== 1 || !document.querySelector("video")) return;
+    void pollStreams(location.href);
   }, 650);
-  document.addEventListener("play", position, true);
-  window.addEventListener("scroll", position, { passive: true, capture: true });
-  window.addEventListener("resize", position);
+  document.addEventListener("play", position, { capture: true, signal: listeners.signal });
+  window.addEventListener("scroll", position, { passive: true, capture: true, signal: listeners.signal });
+  window.addEventListener("resize", position, { signal: listeners.signal });
 })();

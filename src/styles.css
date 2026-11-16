@@ -265,10 +265,11 @@ form textarea { width: 100%; resize: vertical; font: inherit; color: inherit; ba
   .empty { padding-block: 12px; }
 }
 
-.single-window main { gap: 12px; padding: 18px 22px; }
+.single-window main { padding: 18px 22px; }
+.single-content { display: grid; gap: 12px; flex: none; }
 .single-window .picker-menu { max-height: 140px; }
 .single-status { overflow-wrap: anywhere; }
 .single-status small { margin: 0; }
 .single-status .download-progress { max-width: none; }
-.single-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-block: 5px; }
+.single-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; padding-block: 5px; }
 .single-window summary { color: var(--muted); cursor: pointer; }
