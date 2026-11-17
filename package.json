@@ -1,13 +1,13 @@
 {
   "name": "outernet-download-manager",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
-    "check:extension": "node --check browser/background.js && node --check browser/popup.js && node --check browser/video.js && node --check browser/handoff.js && node --check browser/click-download.js && node --check scripts/package-browser.mjs",
+    "check:extension": "node --check browser/background.js && node --check browser/popup.js && node --check browser/video.js && node --check browser/handoff.js && node --check browser/click-download.js && node --check browser/streams.js && node --check scripts/package-browser.mjs",
     "test:extension": "node --test --test-isolation=none scripts/browser-handoff.test.mjs scripts/browser-streams.test.mjs"
   },
   "dependencies": {
