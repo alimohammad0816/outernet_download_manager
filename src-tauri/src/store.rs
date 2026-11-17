@@ -75,6 +75,9 @@ pub struct Job {
     pub format: Format,
     #[serde(default)]
     pub max_height: Option<u32>,
+    /// Browser request headers (cookies, referrer, user agent) needed to fetch a stream.
+    #[serde(default, skip_serializing_if = "media::Headers::is_empty")]
+    pub headers: media::Headers,
     pub expected_sha256: Option<String>,
     pub sha256: Option<String>,
     pub status: Status,
@@ -123,6 +126,9 @@ impl Job {
 }
 
 pub const DEFAULT_QUEUE: &str = "default";
+
+/// Format, quality cap and request headers the browser chose for a download.
+type BrowserSource = (Option<Format>, Option<u32>, media::Headers);
 
 fn default_queue_id() -> String {
     DEFAULT_QUEUE.into()
@@ -339,12 +345,13 @@ impl Store {
         filename: String,
         format: Option<Format>,
         max_height: Option<u32>,
+        headers: media::Headers,
     ) -> Result<(), String> {
         self.add_job(
             url,
             filename,
             String::new(),
-            Some((format, max_height)),
+            Some((format, max_height, headers)),
             DEFAULT_QUEUE,
         )
     }
@@ -354,9 +361,10 @@ impl Store {
         url: String,
         filename: String,
         sha256: String,
-        browser_source: Option<(Option<Format>, Option<u32>)>,
+        browser_source: Option<BrowserSource>,
         queue_id: &str,
     ) -> Result<(), String> {
+        let from_browser = browser_source.is_some();
         self.update(|state| {
             let mut job = Self::new_job(
                 state.settings.clone(),
@@ -366,7 +374,7 @@ impl Store {
                 browser_source,
             )?;
             job.queue_id = queue_id.to_owned();
-            Self::enqueue(state, job, browser_source.is_some())
+            Self::enqueue(state, job, from_browser)
         })
     }
 
@@ -408,16 +416,17 @@ impl Store {
         url: String,
         filename: String,
         sha256: String,
-        browser_source: Option<(Option<Format>, Option<u32>)>,
+        browser_source: Option<BrowserSource>,
     ) -> Result<Job, String> {
         let url = transfer::parse_url(&url)?;
-        let (format, max_height) = browser_source.unwrap_or_default();
+        let (format, max_height, headers) = browser_source.unwrap_or_default();
         let format = format.unwrap_or_else(|| Format::from_url(&url));
         let max_height = max_height.filter(|height| (1..=4320).contains(height));
         let mut filename = filename.trim().to_string();
         if format != Format::File && !filename.to_ascii_lowercase().ends_with(".mkv") {
             let suffix = match format {
                 Format::Hls | Format::HlsLive => ".m3u8",
+                Format::Site => ".html",
                 Format::Dash => ".mpd",
                 _ => "",
             };
@@ -446,6 +455,7 @@ impl Store {
             settings,
             format,
             max_height,
+            headers,
             expected_sha256,
             sha256: None,
             status: Status::Queued,
@@ -654,6 +664,7 @@ impl Store {
         filename: String,
         format: Option<Format>,
         max_height: Option<u32>,
+        headers: media::Headers,
     ) -> Result<String, String> {
         self.update(|state| {
             let mut job = Self::new_job(
@@ -661,7 +672,7 @@ impl Store {
                 url,
                 filename,
                 String::new(),
-                Some((format, max_height)),
+                Some((format, max_height, headers)),
             )?;
             job.status = Status::Draft;
             let id = job.id.clone();
@@ -694,7 +705,9 @@ impl Store {
                 .transpose()?;
             let mut settings = state.settings.clone();
             settings.destination_folder = destination;
-            let source = draft.as_ref().map(|job| (Some(job.format), job.max_height));
+            let source = draft
+                .as_ref()
+                .map(|job| (Some(job.format), job.max_height, job.headers.clone()));
             let url = draft.as_ref().map_or(url, |job| job.url.clone());
             let mut job = Self::new_job(settings, url, filename, sha256, source)?;
             if let Some(draft) = draft {
@@ -786,6 +799,7 @@ impl Store {
                     added_at: Some(unix_millis()),
                     format: Format::File,
                     max_height: None,
+                    headers: media::Headers::new(),
                     expected_sha256: None,
                     sha256: Some(digest),
                     status: if interactive {
@@ -1138,7 +1152,14 @@ impl Store {
                     )?;
                 }
             }
-            format => media::download(&job.url, &directory, format, job.max_height, control)?,
+            format => media::download(
+                &job.url,
+                &directory,
+                format,
+                job.max_height,
+                &job.headers,
+                control,
+            )?,
         }
         let file = File::options()
             .read(true)
@@ -1182,6 +1203,8 @@ impl Store {
                 .map_err(|error| format!("Cannot save the completed file: {error}"))?;
         }
         job.status = Status::Complete;
+        // Session cookies are no longer needed once the file is saved.
+        job.headers.clear();
         self.save_job(job)?;
         let _ = fs::remove_dir_all(job.working_dir());
         Ok(())

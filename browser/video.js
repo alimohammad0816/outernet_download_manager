@@ -80,7 +80,7 @@
     }
     const videos = [...document.querySelectorAll("video")].filter(video => {
       const rect = video.getBoundingClientRect();
-      return (video.currentSrc || streams.some(stream => stream.format === "youtube")) && rect.width >= 120 && rect.height >= 70
+      return rect.width >= 120 && rect.height >= 70
         && rect.bottom >= 48 && rect.top < innerHeight - 48
         && rect.right > 0 && rect.left < innerWidth;
     });
@@ -93,7 +93,7 @@
     const direct = video ? directSource(video) : null;
     activeSource = streams.find(stream => stream.format === "youtube")
       ?? (direct ? streams.find(stream => stream.url === direct.url) ?? direct : null);
-    if (!video || (!activeSource && !streams.length) || document.fullscreenElement) {
+    if (!video || document.fullscreenElement) {
       container.style.display = "none";
       return;
     }
@@ -143,6 +143,18 @@
     button.setAttribute("aria-expanded", "true");
   }
 
+  const QUALITIES = [[0, "Best available"], [1080, "Up to 1080p"], [720, "Up to 720p"], [480, "Up to 480p"], [360, "Up to 360p"]];
+
+  // The site extractor (yt-dlp) reads the page itself, for players whose stream was not detected.
+  function addSiteChoice(label = "Find video on this page") {
+    addChoice(label, () => {
+      closeMenu();
+      for (const [height, quality] of QUALITIES) {
+        addChoice(quality, () => void send({ format: "site", maxHeight: height }));
+      }
+    });
+  }
+
   function chooseQuality(source) {
     closeMenu();
     if (source.format === "file") {
@@ -152,7 +164,7 @@
     if (source.format === "hls") {
       addChoice("Record live in Outernet", () => void send({ ...source, format: "hls_live" }));
     }
-    for (const [height, label] of [[0, "Best available"], [1080, "Up to 1080p"], [720, "Up to 720p"], [480, "Up to 480p"], [360, "Up to 360p"]]) {
+    for (const [height, label] of QUALITIES) {
       addChoice(label, () => void send({ ...source, maxHeight: height }));
     }
   }
@@ -165,14 +177,19 @@
     }
     if (activeSource) {
       chooseQuality(activeSource);
+      if (activeSource.format !== "youtube") addSiteChoice("Other: find video on this page");
     } else if (streams.length === 1) {
       chooseQuality(streams[0]);
+      addSiteChoice("Other: find video on this page");
+    } else if (!streams.length) {
+      addSiteChoice();
     } else {
       for (const stream of streams) {
         const url = new URL(stream.url);
         const format = stream.format === "file" ? "Video file" : stream.format.toUpperCase();
         addChoice(`${format} · ${url.pathname.split("/").pop() || url.hostname}`, () => chooseQuality(stream));
       }
+      addSiteChoice();
     }
   });
 

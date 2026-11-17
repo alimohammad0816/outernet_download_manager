@@ -40,6 +40,8 @@ enum Request {
         format: Option<Format>,
         max_height: Option<u32>,
         #[serde(default)]
+        headers: crate::media::Headers,
+        #[serde(default)]
         interactive: bool,
     },
 }
@@ -296,17 +298,19 @@ fn handle_request(request: Request) -> Result<Launch, String> {
             filename,
             format,
             max_height,
+            headers,
             interactive,
         } => {
             let parsed = transfer::parse_url(&url)?;
             let filename = download_name(&parsed, filename);
+            let headers = crate::media::clean_headers(headers);
             let store = browser_store()?;
             if interactive {
                 store
-                    .prepare_download(parsed.into(), filename, format, max_height)
+                    .prepare_download(parsed.into(), filename, format, max_height, headers)
                     .map(Launch::Popup)
             } else {
-                store.add_from_browser(parsed.into(), filename, format, max_height)?;
+                store.add_from_browser(parsed.into(), filename, format, max_height, headers)?;
                 Ok(Launch::Main)
             }
         }

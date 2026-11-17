@@ -71,11 +71,24 @@ dialog then lets you choose where and when to save it. If staging fails, the
 extension resumes the original when the browser can resume it.
 
 Video support covers finished HLS with discrete segments or byte ranges and
-static single-period DASH with fragmented MP4 SegmentTemplates. HLS byte
-ranges require a strong ETag and matching range responses. Finished HLS also
-supports standard AES-128 with identity keys served by the site, including
-explicit IVs and key rotation. The AES-128 path supports complete segments.
-DRM and SAMPLE-AES require a different playback path.
+static single-period DASH with fragmented MP4 SegmentTemplates. HLS also
+supports standard AES-128 with identity keys, including explicit IVs, key
+rotation, and inline `data:` keys. Outernet fetches HLS segments over six
+connections and retries temporary server errors.
+
+Many streaming sites only serve video to their own player. The extension
+therefore records the cookie, referrer, origin, and user agent that the
+browser sent for each detected stream or page and passes them to Outernet for
+that download. Authorization headers are never forwarded. Outernet keeps them
+with the queued item and clears them once the file is saved. Cookies apply
+only to the site that set them.
+
+If the built-in HLS reader cannot handle a stream, Outernet retries it with
+the bundled yt-dlp engine. When no stream is detected, or the player's site
+needs its own extraction logic, use **Find video on this page** beside the
+player or in the extension popup. That option uses yt-dlp, which supports
+thousands of video sites. DRM-protected video (Widevine, PlayReady, FairPlay,
+SAMPLE-AES) cannot be downloaded.
 
 For a compatible live HLS stream, choose **Record live in Outernet** next to
 the video or **Record live** in the popup. Use **Stop and save recording** in

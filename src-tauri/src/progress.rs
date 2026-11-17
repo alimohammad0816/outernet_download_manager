@@ -113,6 +113,16 @@ impl TransferControl {
         *current = total;
     }
 
+    /// Updates the expected size without resetting progress already reported.
+    pub fn update_total(&self, total: Option<u64>) {
+        *self.total.lock().expect("transfer total lock") = total;
+    }
+
+    /// Records bytes an external engine received so the speed display stays accurate.
+    pub fn note_received(&self, bytes: u64) {
+        self.received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub fn speed_limit_bytes(&self) -> Option<u64> {
         self.bytes_per_second
     }

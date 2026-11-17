@@ -1438,7 +1438,13 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
         ("dash/video.mpd", "dash.mkv"),
     ] {
         store
-            .add_from_browser(fixture.url(input), output.into(), None, Some(480))
+            .add_from_browser(
+                fixture.url(input),
+                output.into(),
+                None,
+                Some(480),
+                Default::default(),
+            )
             .unwrap();
         store.process_next().unwrap();
         let completed = job(&store);
@@ -1479,6 +1485,7 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
             "record.mkv".into(),
             Some(media::Format::HlsLive),
             None,
+            Default::default(),
         )
         .unwrap();
     let store = Arc::new(store);
@@ -1515,6 +1522,7 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
             "gap.mkv".into(),
             Some(media::Format::HlsLive),
             None,
+            Default::default(),
         )
         .unwrap();
     store.process_next().unwrap();
@@ -1544,7 +1552,10 @@ fn assembles_hls_and_dash_video_and_rejects_missing_segments() {
             .add(fixture.url(url), filename.into(), String::new())
             .unwrap();
         store.process_next().unwrap();
-        assert!(job(&store).status == Status::Failed);
+        assert!(
+            job(&store).status == Status::Failed,
+            "{filename} should fail"
+        );
         assert!(!settings.destination_folder.join(filename).exists());
     }
 }
@@ -1643,7 +1654,7 @@ fn quick_download_honors_destination_and_can_run_now_or_later() {
     let queue = store.save_queue(None, "Manual".into(), 1, None).unwrap();
     let (url, server) = serve(Response::CompleteChunked);
     let id = store
-        .prepare_download(url, "single.bin".into(), None, None)
+        .prepare_download(url, "single.bin".into(), None, None, Default::default())
         .unwrap();
     assert!(!store.process_next().unwrap());
     let discarded = store
@@ -1652,6 +1663,7 @@ fn quick_download_honors_destination_and_can_run_now_or_later() {
             "cancelled.bin".into(),
             None,
             None,
+            Default::default(),
         )
         .unwrap();
     store.discard_draft(&discarded).unwrap();

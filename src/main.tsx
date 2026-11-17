@@ -27,7 +27,7 @@ type Job = {
   filename: string;
   queueId: string;
   addedAt: number | null;
-  format?: "file" | "hls" | "hls_live" | "dash" | "youtube";
+  format?: "file" | "hls" | "hls_live" | "dash" | "youtube" | "site";
   status: Status;
   removing?: boolean;
   deferred?: boolean;

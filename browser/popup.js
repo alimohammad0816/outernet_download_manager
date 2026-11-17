@@ -42,12 +42,14 @@ try {
   if (!data?.streams?.length) {
     document.querySelector("#hint").textContent = "Start playing a video to detect its source, or right-click a link to download it.";
   }
-  for (const stream of data?.streams ?? []) {
+  const page = /^https?:/.test(tab.url ?? "") && !data?.streams?.some(stream => stream.format === "youtube");
+  for (const stream of [...data?.streams ?? [], ...page ? [{ format: "site", url: tab.url }] : []]) {
     const row = document.createElement("li");
     const url = new URL(stream.url);
     const name = url.pathname.split("/").pop() || url.hostname;
     const format = stream.format === "file" ? "video file" : stream.format.toUpperCase();
-    const label = stream.format === "youtube" ? "Download YouTube video" : `Download ${format} · ${name}`;
+    const label = stream.format === "youtube" ? "Download YouTube video"
+      : stream.format === "site" ? "Find video on this page" : `Download ${format} · ${name}`;
     const actions = [[label, stream.format]];
     if (stream.format === "hls") actions.push([`Record live · ${name}`, "hls_live"]);
     for (const [label, format] of actions) {
@@ -56,7 +58,7 @@ try {
       button.addEventListener("click", async () => {
         button.disabled = true;
         try {
-          const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, ...stream, format, maxHeight: selectedHeight });
+          const result = await api.runtime.sendMessage({ action: "download", tabId: tab.id, pageUrl: tab.url, ...stream, format, maxHeight: selectedHeight });
           showStatus(result.ok ? (result.popup ? "Opening download window…" : "Added to Outernet") : result.error, result.ok ? "connected" : "error");
         } catch {
           showStatus("Could not send this download.", "error");

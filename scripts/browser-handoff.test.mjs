@@ -156,6 +156,7 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
   const session = new Map();
   const native = [];
   const headers = signal();
+  const sent = signal();
   const messages = signal();
   const api = fixture.api;
   Object.assign(api.runtime, {
@@ -166,8 +167,8 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
   });
   Object.assign(api, {
     contextMenus: { onClicked: signal() },
-    tabs: { onUpdated: signal(), onRemoved: signal() },
-    webRequest: { onHeadersReceived: headers },
+    tabs: { onUpdated: signal(), onRemoved: signal(), async get(id) { return { id, title: "Show: Episode 1 / Part A" }; } },
+    webRequest: { onHeadersReceived: headers, onSendHeaders: sent, onCompleted: signal(), onErrorOccurred: signal() },
     action: { async setBadgeText() {} },
   });
   api.storage.session = {
@@ -182,10 +183,19 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
   globalThis.chrome = api;
   try {
     await import("../browser/background.js");
+    let requestId = 0;
     function observe(url, type, contentType, frameId = 0, statusCode = 200) {
-      headers.emit({ url, type, statusCode, frameId, tabId: 8, method: "GET",
+      const id = String(++requestId);
+      sent.emit({ url, type, frameId, tabId: 8, method: "GET", requestId: id, requestHeaders: [
+        { name: "Referer", value: "https://example.test/watch" },
+        { name: "Cookie", value: `session=${id}` },
+        { name: "Authorization", value: "Bearer secret" },
+      ] });
+      headers.emit({ url, type, statusCode, frameId, tabId: 8, method: "GET", requestId: id,
         responseHeaders: [{ name: "Content-Type", value: contentType }] });
     }
+    sent.emit({ url: "https://example.test/watch", type: "main_frame", frameId: 0, tabId: 8, method: "GET",
+      requestId: "page", requestHeaders: [{ name: "Cookie", value: "page=1" }, { name: "Referer", value: "https://search.test/" }] });
     const direct = "https://example.test/movie?id=1";
     const hls = "https://example.test/index?id=2";
     const dash = "https://example.test/index?id=3";
@@ -202,12 +212,24 @@ test("browser finds progressive and adaptive video and forwards the chosen quali
     assert.deepEqual(toolbar.streams.map(({ url, format }) => [url, format]), [[dash, "dash"], [hls, "hls"], [direct, "file"]]);
     const frame = await send({ action: "streams" }, player);
     assert.deepEqual(frame.streams.map(({ url }) => url), [hls, direct]);
+    assert.ok(frame.streams.every(stream => !stream.headers), "request headers never reach page scripts");
     await send({ action: "download", tabId: 8, ...frame.streams[0], maxHeight: 480 });
     await send({ action: "download", tabId: 8, ...frame.streams[0], maxHeight: 0 });
     await send({ action: "download", tabId: 8, ...frame.streams[0] });
     await send({ action: "download", tabId: 8, ...frame.streams[1], maxHeight: 480 });
     assert.deepEqual(native.map(message => message.max_height), [480, 0, 720, undefined]);
     assert.equal(native.at(-1).filename, "movie.mp4");
+    assert.equal(native.at(-1).headers, undefined);
+    assert.equal(native[0].filename, "Show Episode 1 Part A.mkv");
+    assert.equal(native[0].headers.referer, "https://example.test/watch");
+    assert.equal(native[0].headers.cookie, "session=3");
+    assert.equal(native[0].headers.authorization, undefined);
+    await send({ action: "download", format: "site", maxHeight: 720 }, { url: "https://example.test/watch", tab: { id: 8 }, frameId: 0 });
+    assert.equal(native.at(-1).format, "site");
+    assert.equal(native.at(-1).url, "https://example.test/watch");
+    assert.equal(native.at(-1).max_height, 720);
+    assert.equal(native.at(-1).headers.cookie, "page=1");
+    assert.equal(native.at(-1).headers.referer, "https://example.test/watch");
     await send({ action: "download", tabId: 8, ...frame.streams[0], format: "hls_live", maxHeight: 480 });
     assert.equal(native.at(-1).format, "hls_live");
     assert.equal(native.at(-1).max_height, 480);

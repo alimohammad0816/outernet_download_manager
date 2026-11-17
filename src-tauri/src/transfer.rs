@@ -197,6 +197,15 @@ pub fn http_client(
     follow_redirects: bool,
     control: &TransferControl,
 ) -> Result<reqwest::blocking::Client, String> {
+    http_client_with(follow_redirects, control, |builder| builder)
+}
+
+/// Builds the standard client and lets the caller add headers, a user agent, or cookies.
+pub fn http_client_with(
+    follow_redirects: bool,
+    control: &TransferControl,
+    configure: impl FnOnce(reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder,
+) -> Result<reqwest::blocking::Client, String> {
     use reqwest::{header, redirect::Policy};
     use std::time::Duration;
 
@@ -221,14 +230,16 @@ pub fn http_client(
     } else {
         client
     };
-    client
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(90))
-        .redirect(redirects)
-        .default_headers(headers)
-        .user_agent("Outernet Download Manager")
-        .build()
-        .map_err(|error| format!("Cannot initialize HTTP: {error}"))
+    configure(
+        client
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(90))
+            .redirect(redirects)
+            .default_headers(headers)
+            .user_agent("Outernet Download Manager"),
+    )
+    .build()
+    .map_err(|error| format!("Cannot initialize HTTP: {error}"))
 }
 
 pub fn reset_working_directory(directory: &Path) -> Result<(), String> {
